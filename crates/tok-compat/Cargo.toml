@@ -1,0 +1,13 @@
+[package]
+name = "tok-compat"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "HF fast tokenizer 互操作：tokenizer.json / tokenizer_config.json / special_tokens_map.json"
+
+[dependencies]
+tok-core = { workspace = true }
+tok-models = { workspace = true }
+tok-pipeline = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

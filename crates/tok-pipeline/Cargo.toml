@@ -1,0 +1,18 @@
+[package]
+name = "tok-pipeline"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "L0 门面与编排：Tokenizer / TokenizerBuilder / 配置 / 批处理 / 截断填充"
+
+[dependencies]
+tok-core = { workspace = true }
+tok-normalizers = { workspace = true }
+tok-pretok = { workspace = true }
+tok-models = { workspace = true }
+tok-post = { workspace = true }
+tok-decoders = { workspace = true }
+tok-trainers = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rayon = { workspace = true }

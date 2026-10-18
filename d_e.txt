@@ -1,0 +1,10 @@
+   Compiling tok-models v0.1.0 (E:\tokenizer_rust\crates\tok-models)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.58s
+     Running unittests src\lib.rs (target\debug\deps\tok_models-30cc17492e714c11.exe)
+
+thread 'wordpiece::tests::whole_word_split_without_prefix' (16292) panicked at crates\tok-models\src\wordpiece.rs:331:9:
+assertion `left == right` failed
+  left: ["hello"]
+ right: ["he", "llo"]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+error: test failed, to rerun pass `-p tok-models --lib`

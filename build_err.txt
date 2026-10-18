@@ -1,0 +1,5 @@
+crates\tok-models\src\unigram.rs:8:13: warning: unused imports: `Deserialize` and `Serialize`
+crates\tok-models\src\wordlevel.rs:4:13: warning: unused imports: `Deserialize` and `Serialize`
+warning: `tok-models` (lib) generated 2 warnings (run `cargo fix --lib -p tok-models` to apply 2 suggestions)
+   Compiling tok-cli v0.1.0 (E:\tokenizer_rust\crates\tok-cli)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.12s

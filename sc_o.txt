@@ -1,0 +1,10 @@
+
+running 1 test
+len=6 contains_he=true contains_llo=true id_he=Some(4)
+"hello" -> ["hello#0@(0,5)"]
+"zzz" -> ["zzz#0@(0,3)"]
+"unwanted" -> ["un#1@(0,2)", "want#2@(2,6)", "ed#3@(6,8)"]
+test debug_wordpiece_state ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

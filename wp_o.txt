@@ -1,0 +1,31 @@
+
+running 4 tests
+test wordpiece::tests::greedy_longest_match ... ok
+test wordpiece::tests::trainer_keeps_unk_in_vocab ... ok
+test wordpiece::tests::unmatched_becomes_unk ... FAILED
+test wordpiece::tests::whole_word_split_without_prefix ... FAILED
+
+failures:
+
+---- wordpiece::tests::unmatched_becomes_unk stdout ----
+
+thread 'wordpiece::tests::unmatched_becomes_unk' (11528) panicked at crates\tok-models\src\wordpiece.rs:337:9:
+assertion `left == right` failed
+  left: "zzz"
+ right: "[UNK]"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- wordpiece::tests::whole_word_split_without_prefix stdout ----
+
+thread 'wordpiece::tests::whole_word_split_without_prefix' (22536) panicked at crates\tok-models\src\wordpiece.rs:329:9:
+assertion `left == right` failed
+  left: ["hello"]
+ right: ["he", "llo"]
+
+
+failures:
+    wordpiece::tests::unmatched_becomes_unk
+    wordpiece::tests::whole_word_split_without_prefix
+
+test result: FAILED. 2 passed; 2 failed; 0 ignored; 0 measured; 16 filtered out; finished in 0.00s
+

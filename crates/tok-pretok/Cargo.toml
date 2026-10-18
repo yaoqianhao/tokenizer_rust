@@ -1,0 +1,13 @@
+[package]
+name = "tok-pretok"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "L2 预分词层：Whitespace/Bert/ByteLevel/Metaspace/Digits/Punctuation/Split"
+
+[dependencies]
+tok-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+regex = { workspace = true }
+fancy-regex = { workspace = true }

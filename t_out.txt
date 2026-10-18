@@ -1,0 +1,281 @@
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 2 tests
+test tests::legacy_assets_load_into_bpe_config ... ok
+test tests::fast_artifacts_detected_after_save_pretrained ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+
+running 11 tests
+test types::tests::convert_offsets_maps_back ... ok
+test types::tests::prepend_shifts_splits ... ok
+test types::tests::pad_left_updates_ranges ... ok
+test types::tests::truncate_produces_overflow_with_stride ... ok
+test types::tests::lowercase_keeps_alignment ... ok
+test vocabulary::tests::rstrip_consumes_following_whitespace ... ok
+test vocabulary::tests::special_token_split_is_positional ... ok
+test vocabulary::tests::reject_conflicting_ids ... ok
+test types::tests::split_removed_and_isolated ... ok
+test byte_level::tests::encode_decode_roundtrip ... ok
+test byte_level::tests::mapping_is_bijective ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+
+running 6 tests
+test tests::strip_removes_suffix ... ok
+test tests::byte_fallback_rebuilds_utf8 ... ok
+test tests::metaspace_restores_spaces ... ok
+test tests::identity_and_round_trip_config ... ok
+test tests::wordpiece_strips_prefix_and_merges ... ok
+test tests::bytelevel_decodes_gpt2_style ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 20 tests
+test bpe::tests::special_tokens_appended_at_end ... ok
+test bpe::tests::ignore_merges_short_circuits_whole_word ... ok
+test bpe::tests::vocab_layout_is_stable_and_deterministic ... ok
+test tests::build_and_tokenize_bpe ... ok
+test tests::dispatch_apply_artifact ... ok
+test wordlevel::tests::lookup_and_unk ... ok
+test unigram::tests::hf_json_uses_pair_list ... ok
+test unigram::tests::trainer_assigns_unk_and_specials ... ok
+test tests::rejects_vocab_holes ... ok
+test wordlevel::tests::trainer_is_frequency_ordered ... ok
+test tests::round_trip_hf_json ... ok
+test bpe::tests::merges_are_learned_in_frequency_order ... ok
+test bpe::tests::byte_fallback_uses_byte_tokens ... ok
+test unigram::tests::falls_back_to_single_chars ... ok
+test wordpiece::tests::trainer_keeps_unk_in_vocab ... ok
+test wordpiece::tests::whole_word_split_without_prefix ... ok
+test bpe::tests::unknown_falls_back_to_unk ... ok
+test unigram::tests::viterbi_prefers_high_score_piece ... ok
+test wordpiece::tests::unmatched_becomes_unk ... ok
+test wordpiece::tests::greedy_longest_match ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 1 test
+test debug_wordpiece_state ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 5 tests
+test tests::prepend_maps_to_original_start ... ok
+test tests::nfkc_folds_fullwidth_and_flags_degraded ... FAILED
+test tests::lowercase_then_strip_accents ... FAILED
+test tests::config_json_matches_hf_shape ... ok
+test tests::replace_with_regex_pattern_spec ... ok
+
+failures:
+
+---- tests::nfkc_folds_fullwidth_and_flags_degraded stdout ----
+
+thread 'tests::nfkc_folds_fullwidth_and_flags_degraded' (16872) panicked at crates\tok-normalizers\src\lib.rs:216:9:
+字符数变化必须显式标记退化
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- tests::lowercase_then_strip_accents stdout ----
+
+thread 'tests::lowercase_then_strip_accents' (19752) panicked at crates\tok-normalizers\src\lib.rs:208:9:
+assertion `left == right` failed
+  left: (0, 3)
+ right: (0, 5)
+
+
+failures:
+    tests::lowercase_then_strip_accents
+    tests::nfkc_folds_fullwidth_and_flags_degraded
+
+test result: FAILED. 3 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 12 tests
+test hf::tests::added_tokens_decoder_maps_ids ... ok
+test hf::tests::validate_rejects_bad_merges ... ok
+test hf::tests::roles_inferred_from_special_tokens ... ok
+test tests::byte_level_split_delimiter_behaviour_is_configurable ... ok
+test tests::manual_template_processing_builds_pair_section ... ok
+test tests::wordpiece_wordpiece_output_shape ... FAILED
+test tests::wordpiece_pair_template_and_special_mask ... FAILED
+test tests::truncation_and_padding_follow_hf_semantics ... FAILED
+test tests::validate_rejects_broken_tokenizer_json ... FAILED
+test tests::template_processing_round_trips_through_json ... FAILED
+test tests::byte_level_bpe_shares_vocab_with_added_specials ... FAILED
+test tests::byte_level_bpe_train_export_and_reload ... FAILED
+
+failures:
+
+---- tests::wordpiece_wordpiece_output_shape stdout ----
+
+thread 'tests::wordpiece_wordpiece_output_shape' (13400) panicked at crates\tok-pipeline\src\tests.rs:269:5:
+assertion failed: enc.tokens.contains(&"##s".to_string())
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- tests::wordpiece_pair_template_and_special_mask stdout ----
+
+thread 'tests::wordpiece_pair_template_and_special_mask' (3324) panicked at crates\tok-pipeline\src\tests.rs:240:5:
+assertion `left == right` failed
+  left: Some(0)
+ right: Some(1)
+
+---- tests::truncation_and_padding_follow_hf_semantics stdout ----
+
+thread 'tests::truncation_and_padding_follow_hf_semantics' (12100) panicked at crates\tok-pipeline\src\tests.rs:287:5:
+截断后长度应 ≤ 4，实际 11
+
+---- tests::validate_rejects_broken_tokenizer_json stdout ----
+
+thread 'tests::validate_rejects_broken_tokenizer_json' (25796) panicked at crates\tok-pipeline\src\tests.rs:341:5:
+assertion failed: hf::validate_tokenizer_json(&bad).is_err()
+
+---- tests::template_processing_round_trips_through_json stdout ----
+
+thread 'tests::template_processing_round_trips_through_json' (30740) panicked at crates\tok-pipeline\src\tests.rs:323:5:
+assertion `left == right` failed
+  left: Null
+ right: 2
+
+---- tests::byte_level_bpe_shares_vocab_with_added_specials stdout ----
+
+thread 'tests::byte_level_bpe_shares_vocab_with_added_specials' (3840) panicked at crates\tok-pipeline\src\tests.rs:169:47:
+called `Result::unwrap()` on an `Err` value: Config("模型词表为空")
+
+---- tests::byte_level_bpe_train_export_and_reload stdout ----
+
+thread 'tests::byte_level_bpe_train_export_and_reload' (12044) panicked at crates\tok-pipeline\src\tests.rs:76:47:
+装配失败: Config("模型词表为空")
+
+
+failures:
+    tests::byte_level_bpe_shares_vocab_with_added_specials
+    tests::byte_level_bpe_train_export_and_reload
+    tests::template_processing_round_trips_through_json
+    tests::truncation_and_padding_follow_hf_semantics
+    tests::validate_rejects_broken_tokenizer_json
+    tests::wordpiece_pair_template_and_special_mask
+    tests::wordpiece_wordpiece_output_shape
+
+test result: FAILED. 5 passed; 7 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+
+running 5 tests
+test tests::identity_passthrough ... ok
+test tests::add_special_tokens_false_drops_specials ... ok
+test tests::bind_vocab_fills_missing_special ... ok
+test tests::bert_processor_wraps_single_and_pair ... FAILED
+test tests::template_processing_round_trip ... ok
+
+failures:
+
+---- tests::bert_processor_wraps_single_and_pair stdout ----
+
+thread 'tests::bert_processor_wraps_single_and_pair' (18628) panicked at crates\tok-post\src\lib.rs:459:83:
+called `Result::unwrap()` on an `Err` value: Layer { layer: 5, message: "后处理器无法解析特殊 token '[CLS]'：请先登记到模板 special_tokens 或词表" }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::bert_processor_wraps_single_and_pair
+
+test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 8 tests
+test tests::digits_individual ... ok
+test tests::metaspace_marks_word_starts ... ok
+test tests::whitespace_discards_separators ... ok
+test tests::sequence_is_applied_in_order ... ok
+test tests::bert_splits_punctuation_and_space ... FAILED
+test tests::split_with_removed_behavior ... ok
+test tests::byte_level_offsets_point_to_original_bytes ... ok
+test tests::byte_level_expands_utf8_bytes ... FAILED
+
+failures:
+
+---- tests::bert_splits_punctuation_and_space stdout ----
+
+thread 'tests::bert_splits_punctuation_and_space' (33652) panicked at crates\tok-pretok\src\lib.rs:433:9:
+assertion `left == right` failed
+  left: ["hi", ",", " ", "there", "!"]
+ right: ["hi", ",", "there", "!"]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- tests::byte_level_expands_utf8_bytes stdout ----
+
+thread 'tests::byte_level_expands_utf8_bytes' (32860) panicked at crates\tok-pretok\src\lib.rs:443:9:
+assertion `left == right` failed
+  left: 3
+ right: 1
+
+
+failures:
+    tests::bert_splits_punctuation_and_space
+    tests::byte_level_expands_utf8_bytes
+
+test result: FAILED. 6 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+
+running 5 tests
+test driver::tests::prepare_words_without_layers_returns_identity ... ok
+test corpus::tests::missing_path_errors ... ok
+test driver::tests::train_driver_fills_vocab_and_specials ... ok
+test corpus::tests::reader_respects_max_lines ... ok
+test corpus::tests::reader_skips_empty_lines_and_filters_ext ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

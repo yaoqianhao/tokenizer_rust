@@ -1,0 +1,7 @@
+   Compiling tok-core v0.1.0 (E:\tokenizer_rust\crates\tok-core)
+   Compiling tok-normalizers v0.1.0 (E:\tokenizer_rust\crates\tok-normalizers)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.04s
+     Running unittests src\lib.rs (target\debug\deps\tok_core-f189fd5a2d265b5f.exe)
+     Running unittests src\lib.rs (target\debug\deps\tok_normalizers-4c6b3fb4711a299c.exe)
+   Doc-tests tok_core
+   Doc-tests tok_normalizers

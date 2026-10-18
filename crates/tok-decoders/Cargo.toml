@@ -1,0 +1,12 @@
+[package]
+name = "tok-decoders"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "L6 解码层：ByteLevel / Fuse / WordPiece / Metaspace / BPEDecoder / Replace"
+
+[dependencies]
+tok-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+regex = { workspace = true }

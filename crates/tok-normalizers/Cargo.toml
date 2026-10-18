@@ -1,0 +1,13 @@
+[package]
+name = "tok-normalizers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "L1 规范化层：Identity/Lowercase/NFC/NFKC/StripAccents/Replace/Sequence"
+
+[dependencies]
+tok-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+regex = { workspace = true }
+unicode-normalization = { workspace = true }

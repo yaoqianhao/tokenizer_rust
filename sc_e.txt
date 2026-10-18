@@ -1,0 +1,3 @@
+   Compiling tok-models v0.1.0 (E:\tokenizer_rust\crates\tok-models)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.56s
+     Running tests\scratch_debug.rs (target\debug\deps\scratch_debug-9e97fc4944af77bd.exe)
