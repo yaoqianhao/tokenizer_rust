@@ -332,7 +332,7 @@ impl PreTokenizerWrapper {
                 Ok(())
             }
             PreTokenizerWrapper::Punctuation { behavior } => {
-                ns.split_on_pred(|c| is_punctuation(c), *behavior);
+                ns.split_on_pred(is_punctuation, *behavior);
                 Ok(())
             }
             PreTokenizerWrapper::Split {

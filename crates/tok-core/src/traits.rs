@@ -1,10 +1,10 @@
-//! 六层 trait 契约（L1..L6）+ 训练器 + 漏斗基座 `Funnel`。
+//! 六层 trait 契约（L1..L6）+ 训练器。
 //!
 //! 依赖红线：实现 crate 只依赖 `tok-core`，彼此互不依赖，也不反向依赖 `tok-pipeline`。
 
 use crate::config::{AddedToken, TrainerArtifact, TrainerParams};
 use crate::error::Result;
-use crate::types::{Encoding, NormalizedString, PreToken, Token};
+use crate::types::{Encoding, NormalizedString, Token};
 use crate::vocabulary::Vocabulary;
 
 /// L1 规范化层：仅对 normalized 视图做变换，必须维护对齐表。
@@ -96,17 +96,3 @@ pub trait Trainer: Send + Sync {
     fn finish(&mut self) -> Result<TrainerArtifact>;
     fn name(&self) -> &'static str;
 }
-
-/// 漏斗基座：所有层共享的"输入 → 输出"接口，便于统一编排与测试。
-pub trait Funnel<In, Out>: Send + Sync {
-    fn run(&self, input: In) -> Result<Out>;
-}
-
-impl<In, Out, T: Fn(In) -> Result<Out> + Send + Sync> Funnel<In, Out> for T {
-    fn run(&self, input: In) -> Result<Out> {
-        self(input)
-    }
-}
-
-/// 便捷别名：预分词单元 → 子词序列的漏斗
-pub type ModelFunnel = dyn Funnel<PreToken, Result<Vec<Token>>>;

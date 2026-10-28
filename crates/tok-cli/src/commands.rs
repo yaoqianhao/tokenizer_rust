@@ -378,6 +378,85 @@ pub fn run_inspect(args: InspectArgs) -> Result<()> {
     Ok(())
 }
 
+// ------------------------------------------------------------------ compare
+
+#[derive(Debug, clap::Args)]
+pub struct CompareArgs {
+    /// 左侧 tokenizer（目录或 tokenizer.json）
+    #[arg(long)]
+    pub left: PathBuf,
+    /// 右侧 tokenizer（目录或 tokenizer.json）；用于同实现内自洽校验或跨版本对照
+    #[arg(long)]
+    pub right: PathBuf,
+    /// 待比对文本文件（每行一条；缺省用内置样本）
+    #[arg(long = "text-file")]
+    pub text_file: Option<PathBuf>,
+    /// 仅打印不一致条目
+    #[arg(long, default_value_t = false)]
+    pub only_diff: bool,
+    /// 不一致时以非零码退出（CI 用）
+    #[arg(long, default_value_t = false)]
+    pub strict: bool,
+}
+
+pub fn run_compare(args: CompareArgs) -> Result<()> {
+    let left = load_tokenizer(&args.left)?;
+    let right = load_tokenizer(&args.right)?;
+    let texts = match &args.text_file {
+        Some(p) => std::fs::read_to_string(p)?
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>(),
+        None => default_compare_texts(),
+    };
+    let diffs = tok_compat::diff_ids(&left, &right, &texts)?;
+    let mut mismatched = 0usize;
+    for d in &diffs {
+        if d.is_match() {
+            if !args.only_diff {
+                println!("OK   {:?} → {} ids", d.text, d.left.len());
+            }
+        } else {
+            mismatched += 1;
+            println!("DIFF {:?}", d.text);
+            println!("  left : {:?}", d.left);
+            println!("  right: {:?}", d.right);
+        }
+    }
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&json!({
+            "texts": diffs.len(),
+            "mismatched": mismatched,
+            "matched": diffs.len() - mismatched,
+        }))?
+    );
+    if args.strict && mismatched > 0 {
+        return Err(TokenizerError::config(format!(
+            "{mismatched} / {} 条文本编码不一致",
+            diffs.len()
+        )));
+    }
+    Ok(())
+}
+
+/// 内置对照样本：覆盖多语言、emoji、空白与重音，偏重偏移/边界易错点。
+fn default_compare_texts() -> Vec<String> {
+    [
+        "Hello world! 这是一个中文句子。",
+        "  leading and trailing  ",
+        "emoji 😀🎉 mixed with café naïve résumé",
+        "tabs\tand\nnewlines\r\nhere",
+        "Hello   world,  多空格  测试",
+        "中文English混排test123数字456",
+        "The quick brown fox jumps over the lazy dog.",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
 // ------------------------------------------------------------------ 辅助
 
 fn resolve_tokenizer_path(p: &Path) -> PathBuf {

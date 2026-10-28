@@ -257,7 +257,7 @@ impl PostProcessorWrapper {
     /// 用 `Vocabulary` 补齐模板表（HF 行为：模板中的特殊 token 必须存在于词表）。
     pub fn bind_vocab(&mut self, vocab: &tok_core::Vocabulary) -> Result<()> {
         for s in self.required_specials() {
-            if !self.table.contains_key(&s) {
+            if let std::collections::btree_map::Entry::Vacant(_) = self.table.entry(s.clone()) {
                 let id = vocab.token_to_id(&s).ok_or_else(|| {
                     TokenizerError::layer(
                         layer::POST_PROCESSOR,

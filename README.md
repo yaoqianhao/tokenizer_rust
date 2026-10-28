@@ -65,16 +65,30 @@ tok train \
 | `--sub-iterations` | Unigram 每个剪枝阶段内的 EM 迭代次数，默认 2 |
 | `--hf-model-type` | `config.json` 的 `model_type`：`auto`（默认）/ `none` / 自定义值 |
 
-### 编码 / 解码 / 体检
+### 编码 / 解码 / 体检 / 比对
 
 ```bash
 tok encode --tokenizer artifacts/tok --text "你好，世界" --json
 tok decode --tokenizer artifacts/tok --ids "1,2,3"
 tok inspect --tokenizer artifacts/tok --head 20
+tok compare --left artifacts/tok --right artifacts/tok_new --only-diff --strict
 ```
 
 `--json` 输出完整结构（含 `offsets` / `special_tokens_mask` / `type_ids`）；
 `encode` 支持 `--pair` 启用 pair 模板，`--no-special` 关闭特殊 token 插入。
+
+`compare` 用 `tok-compat::diff_ids` 逐条比对两个 tokenizer 的编码 id，用于
+跨版本回归（重构后与旧产物对照）或自洽校验；`--text-file` 指定每行一条的样本文件
+（缺省走内置多语言样本，覆盖中文 / emoji / 重音 / 多空白），`--only-diff` 只报不一致，
+`--strict` 在存在差异时以非零码退出，便于挂进 CI。
+
+### 对齐基准（HF parity）
+
+`crates/tok-pipeline/tests/hf_parity_golden.rs` 以 **HuggingFace `tokenizers`**
+的输出为外部基准，锁定两套典型配置（byte-level BPE / Metaspace Unigram）在
+`ids` / `tokens` / `offsets` 三个字段上的逐项结果，并额外守住三条性质：
+批量编码与逐条编码逐字段一致、偏移起点在长文本上单调不减、多字节字符被拆成
+多片时共享同一字符区间。基准数据为 `tests/data/*.json`，均为最小可复现词表。
 
 ## 架构
 

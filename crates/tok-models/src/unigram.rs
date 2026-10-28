@@ -208,10 +208,7 @@ impl UnigramModel {
         if sentence.is_empty() {
             return Ok(Vec::new());
         }
-        let unk_id = match self.unk_id {
-            Some(id) => Some(id as usize),
-            None => None,
-        };
+        let unk_id = self.unk_id.map(|id| id as usize);
         let unk_score = self.min_score - K_UNK_PENALTY;
         let size = sentence.len();
 
@@ -503,7 +500,7 @@ impl UnigramTrainer {
             if cand.len() > MAX_CANDIDATES {
                 // 超限时先砍低频候选，保留高频与全部单字符
                 let mut items: Vec<(String, u64)> = cand.drain().collect();
-                items.sort_by(|a, b| b.1.cmp(&a.1));
+                items.sort_by_key(|x| std::cmp::Reverse(x.1));
                 let keep = MAX_CANDIDATES / 2;
                 for (p, n) in items.into_iter().take(keep) {
                     cand.insert(p, n);
@@ -533,6 +530,10 @@ impl UnigramTrainer {
     }
 
     /// 单轮 EM：返回新的 log 概率与期望计数。
+    ///
+    /// 归一化用的三重循环刻意保留索引写法：下标 `i`、`j` 同时索引进出 `alpha`/`beta`
+    /// 与 `bounds`，改写成迭代器反而割裂 DP 语义。
+    #[allow(clippy::needless_range_loop)]
     fn em_step(
         words: &[WordLattice],
         logp: &AHashMap<String, f64>,

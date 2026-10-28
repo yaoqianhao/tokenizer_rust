@@ -25,9 +25,7 @@ pub use config::{
     TruncationStrategy,
 };
 pub use error::{Result, TokenizerError};
-pub use traits::{
-    Decoder, Funnel, Model, ModelFunnel, Normalizer, PostProcessor, PreTokenizer, Trainer,
-};
+pub use traits::{Decoder, Model, Normalizer, PostProcessor, PreTokenizer, Trainer};
 pub use types::{
     Alignment, Encoding, NormalizedString, Offset, PreToken, SplitDelimiterBehavior, Token,
 };

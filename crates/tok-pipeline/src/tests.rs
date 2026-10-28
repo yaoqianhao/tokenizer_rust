@@ -308,7 +308,7 @@ fn wordpiece_pair_template_and_special_mask() {
         2,
         "pair 应含两个 [SEP]"
     );
-    let mask_sum: u32 = enc.special_tokens_mask.iter().map(|m| *m as u32).sum();
+    let mask_sum: u32 = enc.special_tokens_mask.iter().copied().sum();
     assert_eq!(mask_sum, 3, "[CLS] + 2×[SEP] 应为 3 个特殊位");
     assert_eq!(enc.len(), enc.ids.len());
     assert!(enc.validate().is_ok());
@@ -322,13 +322,7 @@ fn wordpiece_pair_template_and_special_mask() {
     let raw = tk.encode_pair("hello world", "tokenizer!", false).unwrap();
     assert!(!raw.ids.contains(&2));
     assert!(!raw.ids.contains(&3));
-    assert_eq!(
-        raw.special_tokens_mask
-            .iter()
-            .map(|m| *m as u32)
-            .sum::<u32>(),
-        0
-    );
+    assert_eq!(raw.special_tokens_mask.iter().copied().sum::<u32>(), 0);
 
     // 未登录词 → [UNK]
     let unknown = tk.encode("zzz", false).unwrap();
@@ -369,7 +363,7 @@ fn truncation_and_padding_follow_hf_semantics() {
         "截断后长度应 ≤ 4，实际 {}",
         enc.ids.len()
     );
-    assert!(enc.overflowing.len() >= 1, "长序列应产生溢出片段");
+    assert!(!enc.overflowing.is_empty(), "长序列应产生溢出片段");
     assert_eq!(enc.ids.first().copied(), Some(2), "截断须保留 [CLS]");
     assert_eq!(enc.ids.last().copied(), Some(3), "截断须保留 [SEP]");
 

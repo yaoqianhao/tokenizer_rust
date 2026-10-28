@@ -5,6 +5,7 @@
 //! * `encode`  ：文本 → id / token / offset / 特殊位掩码
 //! * `decode`  ：id 序列 → 文本
 //! * `inspect` ：体检 tokenizer.json 结构摘要 + 目录产物清单
+//! * `compare` ：两个 tokenizer 逐条比对编码 id（自洽校验 / 跨版本回归）
 
 mod commands;
 
@@ -32,6 +33,8 @@ enum Command {
     Decode(commands::DecodeArgs),
     /// 体检：tokenizer.json 结构摘要与目录产物清单
     Inspect(commands::InspectArgs),
+    /// 比对：两个 tokenizer 对同一批文本的编码 id 是否一致
+    Compare(commands::CompareArgs),
 }
 
 fn main() {
@@ -41,6 +44,7 @@ fn main() {
         Command::Encode(args) => commands::run_encode(args),
         Command::Decode(args) => commands::run_decode(args),
         Command::Inspect(args) => commands::run_inspect(args),
+        Command::Compare(args) => commands::run_compare(args),
     };
     if let Err(err) = outcome {
         eprintln!("错误: {err}");

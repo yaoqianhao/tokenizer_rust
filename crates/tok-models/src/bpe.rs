@@ -127,7 +127,7 @@ impl BpeModel {
             for i in 0..symbols.len() - 1 {
                 let key = (symbols[i].text.clone(), symbols[i + 1].text.clone());
                 if let Some(rank) = self.merge_ranks.get(&key) {
-                    if best.map_or(true, |(br, _)| *rank < br) {
+                    if best.is_none_or(|(br, _)| *rank < br) {
                         best = Some((*rank, i));
                     }
                 }
@@ -200,7 +200,7 @@ impl BpeModel {
         }
     }
 
-    fn apply_affixes(&self, syms: &mut Vec<Symbol>) {
+    fn apply_affixes(&self, syms: &mut [Symbol]) {
         if syms.is_empty() {
             return;
         }
