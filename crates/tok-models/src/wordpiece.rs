@@ -222,29 +222,39 @@ impl Trainer for WordPieceTrainer {
                 "WordPiece 训练：语料为空",
             ));
         }
-        // 1) 字母表（单字符）
-        let mut chars: Vec<char> = self
-            .word_counts
-            .keys()
-            .flat_map(|w| w.chars())
-            .filter(|c| !c.is_whitespace())
-            .collect();
-        chars.sort();
-        chars.dedup();
-
-        // 2) 整词（频次降序，同频按字典序）
-        let min_freq = self.min_frequency;
-        let mut words: Vec<(String, u64)> = self
-            .word_counts
-            .iter()
-            .filter(|(_, c)| **c >= min_freq)
-            .map(|(w, c)| (w.clone(), *c))
-            .collect();
-        words.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-
+        // 1) 字符层：按频次降序累计覆盖，取到 99.95% 为止（SentencePiece
+        //    character_coverage 语义），低频尾巴交给 unk，避免生僻字符吃光预算。
+        //    字符层最多占预算的一半：另一半留给整词 / 续接片段，否则中文这类
+        //    字符集很大的语料会把名额全吃掉，词表退化成纯字符表。
         let reserved = self.special_tokens.len();
         let budget = self.vocab_size.saturating_sub(reserved);
 
+        let mut char_freq: AHashMap<char, u64> = AHashMap::new();
+        for (w, c) in self.word_counts.iter() {
+            for ch in w.chars() {
+                if !ch.is_whitespace() {
+                    *char_freq.entry(ch).or_insert(0) += *c;
+                }
+            }
+        }
+        let total: u64 = char_freq.values().sum();
+        let mut ranked: Vec<(char, u64)> = char_freq.into_iter().collect();
+        ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        let max_keep = (budget / 2).max(1);
+        let mut covered = 0u64;
+        let mut chars: Vec<char> = Vec::new();
+        for (ch, f) in ranked {
+            if chars.len() >= max_keep {
+                break;
+            }
+            if !chars.is_empty() && covered as f64 / total as f64 >= 0.9995 {
+                break;
+            }
+            covered += f;
+            chars.push(ch);
+        }
+
+        // 2) 词表装配：`budget` 是去掉 special 之后的可分配名额
         let mut vocab: Vec<(String, u32)> = Vec::new();
         let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         let mut next_id = 0u32;
@@ -257,23 +267,42 @@ impl Trainer for WordPieceTrainer {
                 false
             }
         };
+        // 2a) 首字符裸形式
         for c in &chars {
             push(c.to_string(), &mut vocab, &mut next_id);
         }
-        for (w, _) in &words {
+        // 2b) 续接单字符 `##c`：词内第二字符起必须有单字符兜底，否则任何多字符词
+        //     只要首字符能匹配、后续必然失配，整词退化为 UNK（HF 的 BertWordPiece
+        //     初始词表同样同时包含裸字符与 `##` 字符）。
+        for c in &chars {
             if vocab.len() >= budget {
                 break;
             }
-            if self
-                .max_token_length
-                .map(|m| w.chars().count() > m)
+            push(
+                format!("{}{}", self.continuing_subword_prefix, c),
+                &mut vocab,
+                &mut next_id,
+            );
+        }
+
+        // 3) 剩余预算由"整词"与"续接片段"统一按频次竞争。
+        //    旧实现先把整词灌到预算上限、再补 `##` 片段，长尾语料下整词会吃光名额，
+        //    产物里一个 `##` 片段都没有 → 加载后用不了。同频时优先整词（更省 token），
+        //    其次更长的片段（覆盖面更大）。
+        let min_freq = self.min_frequency;
+        let too_long = |piece: &str| {
+            self.max_token_length
+                .map(|m| piece.chars().count() > m)
                 .unwrap_or(false)
-            {
+        };
+        // (piece, 频次, 类别：0 整词 / 1 续接)
+        let mut cands: Vec<(String, u64, u8)> = Vec::new();
+        for (w, c) in self.word_counts.iter() {
+            if *c < min_freq || too_long(w) {
                 continue;
             }
-            push(w.clone(), &mut vocab, &mut next_id);
+            cands.push((w.clone(), *c, 0));
         }
-        // 3) 续接片段 `##suffix`
         let mut cont: AHashMap<String, u64> = AHashMap::new();
         for (w, c) in self.word_counts.iter() {
             let cs: Vec<char> = w.chars().collect();
@@ -282,17 +311,30 @@ impl Trainer for WordPieceTrainer {
             }
             for i in 1..cs.len() {
                 let piece: String = cs[i..].iter().collect();
+                if too_long(&piece) {
+                    continue;
+                }
                 let cand = format!("{}{}", self.continuing_subword_prefix, piece);
                 *cont.entry(cand).or_insert(0) += *c;
             }
         }
-        let mut cont_vec: Vec<(String, u64)> = cont.into_iter().collect();
-        cont_vec.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-        for (p, _) in cont_vec {
+        for (piece, c) in cont {
+            if c < min_freq {
+                continue;
+            }
+            cands.push((piece, c, 1));
+        }
+        cands.sort_by(|a, b| {
+            b.1.cmp(&a.1)
+                .then(a.2.cmp(&b.2))
+                .then(b.0.chars().count().cmp(&a.0.chars().count()))
+                .then(a.0.cmp(&b.0))
+        });
+        for (piece, _, _) in cands {
             if vocab.len() >= budget {
                 break;
             }
-            push(p, &mut vocab, &mut next_id);
+            push(piece, &mut vocab, &mut next_id);
         }
         // 4) special 追加末尾
         for t in &self.special_tokens {
@@ -375,6 +417,54 @@ mod tests {
         assert_eq!(toks.len(), 1, "不应残留 un / ##want 的部分匹配结果");
         assert_eq!(toks[0].value, "[UNK]");
         assert_eq!(toks[0].offsets, (0, "unwantly".len()));
+    }
+
+    #[test]
+    fn trainer_emits_continuing_pieces_so_words_stay_encodable() {
+        // 回归：旧实现先把整词灌满预算、再补 `##` 片段，长尾语料下产物里一个
+        // 续接片段都没有，加载后词内第二字符起必然失配 → 整词退化为 UNK。
+        let params = TrainerParams {
+            vocab_size: 60,
+            min_frequency: 1,
+            ..Default::default()
+        };
+        let mut t = WordPieceTrainer::new(params, "[UNK]");
+        t.feed_groups(&[vec!["unwanted".into(), "unwanted".into(), "wanted".into()]])
+            .unwrap();
+        let TrainerArtifact::WordPiece { vocab } = t.finish().unwrap() else {
+            panic!()
+        };
+        let mut v = Vocabulary::new();
+        for (tok, id) in vocab {
+            v.insert(&tok, id).unwrap();
+        }
+        let m = WordPieceModel::new(v, "[UNK]");
+        assert!(m.vocab.contains("##e"), "词表缺少续接单字符 `##e`");
+        let toks = m.tokenize("unwanted").unwrap();
+        let vals: Vec<&str> = toks.iter().map(|t| t.value.as_str()).collect();
+        assert!(!vals.contains(&"[UNK]"), "语料内的词不应整词 UNK: {vals:?}");
+    }
+
+    #[test]
+    fn trainer_reserves_budget_for_pieces() {
+        // 字符层最多占预算一半，另一半必须留给整词 / 续接片段
+        let params = TrainerParams {
+            vocab_size: 40,
+            min_frequency: 1,
+            ..Default::default()
+        };
+        let mut t = WordPieceTrainer::new(params, "[UNK]");
+        t.feed_groups(&[vec!["alpha".into(), "alphabet".into(), "beta".into()]])
+            .unwrap();
+        let TrainerArtifact::WordPiece { vocab } = t.finish().unwrap() else {
+            panic!()
+        };
+        let whole: Vec<&String> = vocab
+            .iter()
+            .filter(|(tk, _)| !tk.starts_with("##") && tk.chars().count() > 1)
+            .map(|(tk, _)| tk)
+            .collect();
+        assert!(!whole.is_empty(), "整词区为空，预算被字符层吃光");
     }
 
     #[test]
