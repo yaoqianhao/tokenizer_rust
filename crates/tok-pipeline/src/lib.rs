@@ -22,7 +22,8 @@ pub use hf::{
     TOKENIZER_CONFIG_JSON, TOKENIZER_JSON,
 };
 pub use tokenizer::{
-    bert_like, byte_level_bpe, load_tokenizer_json, specials, PipelineConfig, SavedFiles, Tokenizer,
+    bert_like, byte_level_bpe, load_pretrained, load_tokenizer_json, specials, PipelineConfig,
+    SavedFiles, Tokenizer,
 };
 
 // 便捷再导出：上层（CLI / 外部工具）无需逐个依赖六层实现 crate；

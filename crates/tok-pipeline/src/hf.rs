@@ -125,11 +125,103 @@ impl TokenRoles {
         take(&mut self.cls_token, &other.cls_token);
         take(&mut self.sep_token, &other.sep_token);
         take(&mut self.mask_token, &other.mask_token);
+        // additional 必须扣掉已占槽位的 token：`infer` 是顺序贪心，遇到
+        // "第二个 cls 候选"（如显式声明 `<|cls|>`、词表里又留着 `[CLS]`）时会把它
+        // 落到 additional 里；若原样并入，同一 token 会既占 cls 又是 additional，
+        // HF 侧 `convert_tokens_to_ids` 的语义就出现歧义。
+        let taken: Vec<String> = self.all();
         for t in &other.additional_special_tokens {
-            if !self.additional_special_tokens.contains(t) {
+            if !self.additional_special_tokens.contains(t) && !taken.contains(t) {
                 self.additional_special_tokens.push(t.clone());
             }
         }
+    }
+
+    /// 从 HF `special_tokens_map.json` / `tokenizer_config.json` 的 role 字段读取角色。
+    ///
+    /// 兼容两种形态：纯字符串（BERT 系 `"unk_token": "[UNK]"`）与对象形态
+    /// （GPT-2 系 `"unk_token": {"content": "<|endoftext|>", "lstrip": false, ...}`）。
+    /// 对象形态里真正有用的是 `content`，其余字段（lstrip/rstrip/single_word）由
+    /// `added_tokens_decoder` 承载，这里只取内容。
+    pub fn from_hf_json(value: &Value) -> Self {
+        fn read(v: &Value, key: &str) -> Option<String> {
+            match v.get(key) {
+                Some(Value::String(s)) if !s.is_empty() => Some(s.clone()),
+                Some(Value::Object(o)) => o
+                    .get("content")
+                    .and_then(|c| c.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string()),
+                _ => None,
+            }
+        }
+        let mut roles = TokenRoles {
+            unk_token: read(value, "unk_token"),
+            bos_token: read(value, "bos_token"),
+            eos_token: read(value, "eos_token"),
+            pad_token: read(value, "pad_token"),
+            cls_token: read(value, "cls_token"),
+            sep_token: read(value, "sep_token"),
+            mask_token: read(value, "mask_token"),
+            additional_special_tokens: Vec::new(),
+        };
+        if let Some(items) = value
+            .get("additional_special_tokens")
+            .and_then(|v| v.as_array())
+        {
+            for it in items {
+                let tok = match it {
+                    Value::String(s) => Some(s.clone()),
+                    Value::Object(_) => read(it, "content").or_else(|| {
+                        it.get("content")
+                            .and_then(|c| c.as_str())
+                            .map(|s| s.to_string())
+                    }),
+                    _ => None,
+                };
+                if let Some(t) = tok {
+                    if !t.is_empty() && !roles.additional_special_tokens.contains(&t) {
+                        roles.additional_special_tokens.push(t);
+                    }
+                }
+            }
+        }
+        roles
+    }
+
+    /// 校验角色表本身是否自洽：同一 token 不得占据两个角色槽位。
+    pub fn validate(&self) -> Result<()> {
+        let mut seen: Vec<(&str, &str)> = Vec::new();
+        let slots = [
+            ("unk_token", &self.unk_token),
+            ("bos_token", &self.bos_token),
+            ("eos_token", &self.eos_token),
+            ("pad_token", &self.pad_token),
+            ("cls_token", &self.cls_token),
+            ("sep_token", &self.sep_token),
+            ("mask_token", &self.mask_token),
+        ];
+        for (name, slot) in slots {
+            let Some(tok) = slot else { continue };
+            if let Some((prev_name, _)) = seen.iter().find(|(_, t)| *t == tok.as_str()) {
+                return Err(TokenizerError::config(format!(
+                    "token '{}' 同时被声明为 {} 与 {} 的角色 token（HF 不允许一个 token 占两个角色）",
+                    tok, prev_name, name
+                )));
+            }
+            seen.push((name, tok.as_str()));
+        }
+        if let Some(tok) = seen
+            .iter()
+            .map(|(_, t)| *t)
+            .find(|t| self.additional_special_tokens.iter().any(|x| x == t))
+        {
+            return Err(TokenizerError::config(format!(
+                "token '{}' 既是角色 token 又出现在 additional_special_tokens 中",
+                tok
+            )));
+        }
+        Ok(())
     }
 
     /// 是否未设置任何角色 token。

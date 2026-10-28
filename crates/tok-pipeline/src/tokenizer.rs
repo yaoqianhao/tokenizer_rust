@@ -302,6 +302,105 @@ impl Tokenizer {
         self.config.padding = params;
     }
 
+    /// 替换后处理器（`None` 关闭）。
+    ///
+    /// 训练前设置会在 `from_config` 阶段因空词表无法 `bind_vocab`，因此典型用法是
+    /// 训练完成后调用：写入的配置会同步到 `PipelineConfig`，再 `bind_vocab` 到当前词表。
+    pub fn set_post_processor(&mut self, cfg: Option<PostProcessorConfig>) -> Result<()> {
+        let normalized = match cfg {
+            None => None,
+            Some(c) => Some(self.bind_post_processor(c)?),
+        };
+        let wrapper = match &normalized {
+            None => PostProcessorWrapper::identity(),
+            Some(c) => {
+                let mut w = PostProcessorWrapper::build(c)?;
+                w.bind_vocab(self.model.get_vocab())?;
+                w
+            }
+        };
+        self.post_processor = wrapper;
+        self.config.post_processor = normalized;
+        Ok(())
+    }
+
+    /// 替换解码器（`None` 关闭）；与词表强相关的约束（如 WordPiece `##` 前缀）在此校验。
+    pub fn set_decoder(&mut self, cfg: Option<DecoderConfig>) -> Result<()> {
+        let wrapper = match &cfg {
+            None => None,
+            Some(d) => Some(DecoderWrapper::build(d)?),
+        };
+        self.decoder = wrapper;
+        self.config.decoder = cfg;
+        self.refresh_decoder_binding()
+    }
+
+    /// 把配置里的占位 id 换成词表真实 id，并给模板补齐 `special_tokens` 表。
+    ///
+    /// HF 的 `BertProcessing` / `RobertaProcessing` 把 `(token, id)` 写死进配置，
+    /// 直接沿用用户传的占位 id 会让导出的 `tokenizer.json` 与实际词表错位，因此统一回填。
+    fn bind_post_processor(&self, cfg: PostProcessorConfig) -> Result<PostProcessorConfig> {
+        let vocab = self.model.get_vocab();
+        let mut probe = PostProcessorWrapper::build(&cfg)?;
+        probe.bind_vocab(vocab)?;
+        let fixed = |pair: &(String, u32)| -> Result<(String, u32)> {
+            Ok((pair.0.clone(), probe.resolve_id(&pair.0)?))
+        };
+        Ok(match cfg {
+            PostProcessorConfig::BertProcessing { sep, cls } => {
+                PostProcessorConfig::BertProcessing {
+                    sep: fixed(&sep)?,
+                    cls: fixed(&cls)?,
+                }
+            }
+            PostProcessorConfig::RobertaProcessing {
+                sep,
+                cls,
+                trim_offsets,
+                add_prefix_space,
+            } => PostProcessorConfig::RobertaProcessing {
+                sep: fixed(&sep)?,
+                cls: fixed(&cls)?,
+                trim_offsets,
+                add_prefix_space,
+            },
+            PostProcessorConfig::TemplateProcessing {
+                single,
+                pair,
+                mut special_tokens,
+            } => {
+                for p in single.iter().chain(pair.iter()) {
+                    if let tok_post::TemplatePiece::SpecialToken(s) = p {
+                        let literal = s.special_token.id.clone();
+                        if !special_tokens.contains_key(&literal) {
+                            let id = probe.resolve_id(&literal)?;
+                            special_tokens.insert(
+                                literal.clone(),
+                                tok_post::SpecialTokenEntry {
+                                    id: literal.clone(),
+                                    ids: vec![id],
+                                    tokens: vec![literal],
+                                },
+                            );
+                        }
+                    }
+                }
+                PostProcessorConfig::TemplateProcessing {
+                    single,
+                    pair,
+                    special_tokens,
+                }
+            }
+            PostProcessorConfig::Sequence { processors } => PostProcessorConfig::Sequence {
+                processors: processors
+                    .into_iter()
+                    .map(|p| self.bind_post_processor(p))
+                    .collect::<Result<Vec<_>>>()?,
+            },
+            other => other,
+        })
+    }
+
     pub fn model(&self) -> &ModelWrapper {
         &self.model
     }
@@ -354,6 +453,49 @@ impl Tokenizer {
         self.added_tokens = added;
         self.rebuild_special_set();
         Ok(count)
+    }
+
+    /// 显式设定角色 token（E6 端到端联动）。
+    ///
+    /// 语义：
+    /// 1. 先做自洽性校验（同一 token 不得占两个角色槽位，也不得与
+    ///    `additional_special_tokens` 重复）；
+    /// 2. 每个角色 token 都登记为 **special** 的 added token——HF 的
+    ///    `special_tokens_mask` / `skip_special_tokens` / `added_tokens_decoder`
+    ///    都按 added 视图判定，仅写进 `tokenizer_config.json` 而不登记会与 HF 判定不一致；
+    /// 3. 若该 token 已作为**非 special** 的 added token 存在（如用户用 `--special`
+    ///    加进来、但语义上应是 cls），就地升级为 special，保持 id 不变。
+    pub fn set_roles(&mut self, roles: TokenRoles) -> Result<()> {
+        roles.validate()?;
+        let wanted = roles.all();
+        // 逐个对齐 special 标记：把既有的非 special 后加 token 就地升级（保 id），
+        // 再补登记完全缺失的角色 token。
+        for tok in &wanted {
+            let already_special = self
+                .added_tokens
+                .iter()
+                .any(|t| t.content == *tok && t.special);
+            if already_special {
+                continue;
+            }
+            if self.model.get_vocab_mut().promote_added_special(tok) {
+                if let Some(slot) = self.added_tokens.iter_mut().find(|t| t.content == *tok) {
+                    slot.special = true;
+                }
+            }
+        }
+        let mut to_register: Vec<AddedToken> = Vec::new();
+        roles.ensure_in_added(&mut to_register);
+        let to_register: Vec<AddedToken> = to_register
+            .into_iter()
+            .filter(|t| !self.added_tokens.iter().any(|a| a.content == t.content))
+            .collect();
+        if !to_register.is_empty() {
+            self.register_added(&to_register)?;
+        }
+        self.roles = roles;
+        self.rebuild_special_set();
+        Ok(())
     }
 
     /// 重建特殊 token id 集合（`register_added` / `train` 之后调用）。
@@ -475,38 +617,27 @@ impl Tokenizer {
     }
 
     fn encode_one(&self, text: &str) -> Result<Encoding> {
-        // ---- S0 规范化（保持 original↔normalized 对齐）
-        let mut ns = NormalizedString::new(text);
-        if let Some(n) = &self.normalizer {
-            ns = n.normalize(ns);
-        }
-        // ---- S1 后加 token 前置切分（最长左匹配）
-        let units = self.model.get_vocab().added().split(ns.normalized());
+        // S1 → S0 顺序与 HF 一致：**先按原文切出后加 token，再对每个正文片段单独规范化**。
+        //
+        // HF 的 `AddedVocabulary::extract_and_normalize` 就是「先 split added tokens，
+        // 再逐片 normalize」，因此 `Prepend` / `Strip` 这类非幂等归一化会作用在**每个片段**
+        // 上（`"a [MASK] b"` → `"a [MASK]"` 与 `" b"` 两片各自 prepend 出 `▁`）。
+        // 早期实现是「整串先规范、再切 added token」，导致带 added token 的文本归一化结果
+        // 与 HF 不一致（E4 对照：`▁` 只出现在开头）。
+        let units = self.model.get_vocab().added().split(text);
         let mut enc = Encoding::default();
-        let mut degraded = ns.is_degraded();
+        let mut degraded = false;
         // 字符起点表：字节偏移 → 字符索引的换算从「每次从头数」变成「一次构建 + 二分」，
         // 否则每个子词都要 `chars().count()` 一遍原文，编码整体退化为 O(n²)。
         let char_starts = char_index_table(text);
-        // 后加 token 切分单元与预分词片均按原文顺序递增 → 对齐表游标可跨单元复用。
-        // 注意：片级与子词级是两套互相交错的区间序列（子词级起点总会落在片级游标之后），
-        // 共用游标会不断触发回退重扫使 encode 退化为 O(n²)，因此各自独立。
-        let mut ns_cursor = 0usize;
-        let mut ns_subword_cursor = 0usize;
 
         for unit in units {
             match unit.id {
                 Some(id) => {
-                    let off = ns
-                        .convert_offsets_from((unit.start, unit.end), &mut ns_cursor)
-                        .map(|o| (o.start, o.end));
-                    if off.is_none() {
-                        degraded = true;
-                    }
-                    let (s, e) = off.unwrap_or((0, 0));
-                    // 与子词分支保持同一坐标系：对外 offsets 一律是**原文字符**区间
+                    // 后加 token 直接落在原文区间上，无需经归一化对齐表换算
                     let (s, e) = (
-                        byte_to_char_with(&char_starts, s),
-                        byte_to_char_with(&char_starts, e),
+                        byte_to_char_with(&char_starts, unit.start),
+                        byte_to_char_with(&char_starts, unit.end),
                     );
                     let special = self.special_set.contains(&id);
                     enc.ids.push(id);
@@ -517,30 +648,29 @@ impl Tokenizer {
                     enc.special_tokens_mask.push(if special { 1 } else { 0 });
                 }
                 None => {
-                    // ---- S2 预分词（段内切分，偏移按整串对齐表换算，保证精确）
-                    let seg = &ns.normalized()[unit.start..unit.end];
-                    if seg.is_empty() {
+                    // ---- S0 规范化（片段内，保持 original↔normalized 对齐）
+                    let chunk = &text[unit.start..unit.end];
+                    if chunk.is_empty() {
                         continue;
                     }
-                    let mut local = NormalizedString::new(seg);
+                    let mut local = NormalizedString::new(chunk);
+                    if let Some(n) = &self.normalizer {
+                        local = n.normalize(local);
+                    }
+                    degraded |= local.is_degraded();
+                    // ---- S2 预分词（片段内切分）
                     if let Some(p) = &self.pre_tokenizer {
                         p.pre_tokenize(&mut local)?;
                     }
-                    // 片偏移同样递增 → 单元内游标复用
-                    let mut local_cursor = 0usize;
+                    // 子词区间在同一片段内单调递增，游标可复用（摊还 O(1)）。
+                    let mut sw_cursor = 0usize;
                     for pt in local.pretokens() {
-                        let abs = (unit.start + pt.offsets.0, unit.start + pt.offsets.1);
-                        let outer = match ns.convert_offsets_from(abs, &mut ns_cursor) {
-                            Some(o) => (o.start, o.end),
-                            None => {
-                                degraded = true;
-                                (0, 0)
-                            }
-                        };
+                        // `pretokens()` 给出的 `offsets` 已是**本片段原文**坐标（内部已换算），
+                        // 这里只需加片段基址；`n_offsets` 才是规范化串坐标，留给子词级换算。
+                        let outer = (unit.start + pt.offsets.0, unit.start + pt.offsets.1);
                         // ---- S3 子词切分
                         let subwords = self.model.tokenize(&pt.value)?;
                         for sw in subwords {
-                            let is_special = self.special_set.contains(&sw.id);
                             enc.ids.push(sw.id);
                             enc.type_ids.push(0);
                             enc.tokens.push(sw.value.clone());
@@ -554,30 +684,27 @@ impl Tokenizer {
                             // wordpiece/unigram 亦然），因此直接相加，不做字节→字符换算。
                             let rel =
                                 (pt.n_offsets.0 + sw.offsets.0, pt.n_offsets.0 + sw.offsets.1);
-                            let (s, e) = match local.convert_offsets_from(rel, &mut local_cursor) {
-                                Some(o) => {
-                                    let abs = (unit.start + o.start, unit.start + o.end);
-                                    match ns.convert_offsets_from(abs, &mut ns_subword_cursor) {
-                                        Some(o2) => (o2.start, o2.end),
-                                        None => {
-                                            degraded = true;
-                                            (0, 0)
-                                        }
-                                    }
-                                }
+                            if std::env::var("TOK_DEBUG_OFF").is_ok() {
+                                let rr = local.convert_offsets_from(rel, &mut 0usize);
+                                eprintln!("DBG rel={:?} -> {:?} (no-cursor)", rel, rr);
+                            }
+                            let (s, e) = match local.convert_offsets_from(rel, &mut sw_cursor) {
+                                Some(o) => (unit.start + o.start, unit.start + o.end),
                                 // 对齐表未命中：退化为整个预分词单元区间
-                                None => (outer.0, outer.1),
+                                None => outer,
                             };
                             // 对外语义与 HF 对齐：offsets 输出**原文字符**区间（内部全程为字节）。
                             // 注意：特殊 token 也保留真实区间（HF 的 offsets 不因 special 置零，
                             // 只有 special_tokens_mask 标 1），因此这里不再对 is_special 特判。
-                            let (s, e) = (
-                                byte_to_char_with(&char_starts, s),
-                                byte_to_char_with(&char_starts, e),
-                            );
+                            let (s, e) = byte_range_to_chars(&char_starts, s, e);
                             enc.offsets.push((s, e));
                             enc.attention_mask.push(1);
-                            enc.special_tokens_mask.push(if is_special { 1 } else { 0 });
+                            // 模型产出的 token 一律 mask=0：HF 的 special_tokens_mask 只标
+                            // 1）模板插入的特殊 token，2）在原文中字面出现的 added special token
+                            // （走上面的 added-token 分支）。未登录词替换出来的 [UNK] 属于
+                            // 模型产出，HF 标记为 0；若误标 1，`Encoding::truncate` 会把它当
+                            // 特殊 token 排除在内容预算外，导致截断长度与 HF 差一（E5 对照暴露）。
+                            enc.special_tokens_mask.push(0);
                         }
                     }
                 }
@@ -603,8 +730,11 @@ impl Tokenizer {
                 }
             }
             None => {
+                // HF 在 decoder 为 None 时不会做任何拼接语义处理，而是把 token 以**单个空格**连接
+                // （`TokenizerImpl::decode` 末尾统一 `tokens.join(" ")`）。实测 ▁Hello/▁world!
+                // 两 token 的 HF 结果是 `▁Hello ▁world!`，故此处必须用空格而非直接 concat。
                 let specials = self.special_ids();
-                let mut out = String::new();
+                let mut kept: Vec<String> = Vec::new();
                 for id in ids {
                     if skip_special_tokens && specials.contains(id) {
                         continue;
@@ -615,9 +745,9 @@ impl Tokenizer {
                             format!("解码失败：词表中不存在 id {}", id),
                         )
                     })?;
-                    out.push_str(&t);
+                    kept.push(t);
                 }
-                Ok(out)
+                Ok(kept.join(" "))
             }
         }
     }
@@ -976,6 +1106,51 @@ pub fn load_tokenizer_json(path: &Path) -> Result<Tokenizer> {
     Tokenizer::from_tokenizer_json(&value)
 }
 
+/// 从 HF 目录（`save_pretrained` 的产物）**完整**恢复一个 `Tokenizer`。
+///
+/// 与 `load_tokenizer_json` 的差别：`tokenizer.json` 只描述模型/流水线/added_tokens，
+/// **不承载角色语义**（哪个是 cls、哪个是 sep）。角色在 HF 侧由
+/// `special_tokens_map.json`（或 `tokenizer_config.json`）声明，所以按目录加载时必须
+/// 把这两份文件读回来，否则 `encode_pair` 会退化成"无后处理"、`pad_token_id` 也拿不到。
+///
+/// 恢复优先级：`special_tokens_map.json` 显式值 → `tokenizer_config.json` 显式值 →
+/// 由 added_tokens 名字推断（`TokenRoles::infer`）→ `fill_missing` 补齐其余。
+pub fn load_pretrained(dir: &Path) -> Result<Tokenizer> {
+    let dir = if dir.is_dir() {
+        dir.to_path_buf()
+    } else {
+        dir.parent().unwrap_or(Path::new(".")).to_path_buf()
+    };
+    let tj_path = dir.join(hf::TOKENIZER_JSON);
+    let mut tk = load_tokenizer_json(&tj_path)?;
+
+    let read_json = |name: &str| -> Option<Value> {
+        std::fs::read_to_string(dir.join(name))
+            .ok()
+            .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+    };
+
+    let from_map = read_json(hf::SPECIAL_TOKENS_MAP_JSON)
+        .map(|v| TokenRoles::from_hf_json(&v))
+        .unwrap_or_default();
+    let from_cfg = read_json(hf::TOKENIZER_CONFIG_JSON).unwrap_or(Value::Null);
+
+    let inferred = TokenRoles::infer(tk.added_tokens());
+    let mut roles = from_map;
+    roles.fill_missing(&TokenRoles::from_hf_json(&from_cfg));
+    roles.fill_missing(&inferred);
+    tk.set_roles(roles)?;
+
+    if let Some(len) = from_cfg
+        .get("model_max_length")
+        .and_then(|v| v.as_u64())
+        .filter(|v| *v > 0)
+    {
+        tk.model_max_length = len as usize;
+    }
+    Ok(tk)
+}
+
 /// 便捷构造：把 CLI 的 `--special` 之类的裸字符串转成 AddedToken。
 pub fn specials(tokens: &[&str]) -> Vec<AddedToken> {
     tokens.iter().map(|s| AddedToken::new(*s, true)).collect()
@@ -986,6 +1161,24 @@ pub fn specials(tokens: &[&str]) -> Vec<AddedToken> {
 /// 一次构建此表可让每次换算走二分，避免逐 token 重数字符串。
 fn char_index_table(s: &str) -> Vec<usize> {
     s.char_indices().map(|(i, _)| i).collect()
+}
+
+/// 字节区间 → 字符区间：起点**向下**取到所在字符，终点**向上**取到字符末尾。
+///
+/// 子词在字节级映射后可能只覆盖某个多字节字符的一部分（例如 `你` 的 3 个 UTF-8 字节
+/// 各自成一个 token），此时 HF 的 offsets 仍给出该字符的完整区间（三个 token 都是
+/// `(0,1)`）。用 `byte_to_char_with` 同时处理两端会把起点推到下一个字符，产出 `(1,1)`
+/// 这类零宽/错位区间，因此起止必须分别向下 / 向上取整。
+fn byte_range_to_chars(
+    char_starts: &[usize],
+    start_byte: usize,
+    end_byte: usize,
+) -> (usize, usize) {
+    let start = char_starts
+        .partition_point(|&b| b <= start_byte)
+        .saturating_sub(1);
+    let end = char_starts.partition_point(|&b| b < end_byte);
+    (start, end.max(start))
 }
 
 /// 字节偏移 → 字符索引（非字符边界时向下取到最近的边界，容错）。

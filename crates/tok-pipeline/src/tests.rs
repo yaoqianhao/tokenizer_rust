@@ -19,7 +19,9 @@ use tok_pretok::{BehaviorSpec, PreTokenizerConfig, SplitDelimiterBehavior};
 use tok_trainers::CorpusReader;
 
 use crate::hf::{self, TokenRoles};
-use crate::tokenizer::{bert_like, load_tokenizer_json, PipelineConfig, Tokenizer};
+use crate::tokenizer::{
+    bert_like, load_pretrained, load_tokenizer_json, PipelineConfig, Tokenizer,
+};
 
 fn temp_dir(tag: &str) -> PathBuf {
     let nanos = SystemTime::now()
@@ -457,12 +459,56 @@ fn unk_and_cjk_tokens_keep_real_offsets() {
     let last = enc.tokens.len() - 1;
     assert_eq!(enc.tokens[last], "[UNK]");
     assert_eq!(enc.offsets[last], (14, 19), "[UNK] 的 offset 应为真实区间");
-    assert_eq!(enc.special_tokens_mask[last], 1, "[UNK] 仍须标记为 special");
+    // HF 语义：未登录词替换出的 [UNK] 属于模型产出，special_tokens_mask 为 0
+    //（只有模板插入/原文中字面出现的 special token 才标 1）。
+    assert_eq!(enc.special_tokens_mask[last], 0, "[UNK] 不应标记为 special");
 
     let enc = tk.encode("苹果 香蕉", true).unwrap();
     assert!(enc.tokens.iter().all(|t| t == "[UNK]"));
     assert_eq!(enc.offsets[0], (0, 2));
     assert_eq!(enc.offsets[1], (3, 5));
+}
+
+#[test]
+fn normalizer_runs_per_added_token_segment() {
+    // HF 的 `AddedVocabulary::extract_and_normalize` 是「先按 added token 切分，再逐片规范化」，
+    // 因此 `Prepend` 这类非幂等归一化会作用在**每个片段**上，而不只是整串开头。
+    // 早期实现「整串先规范化、再切 added token」，导致 `"hello [MASK] world"` 里
+    // `world` 前缺少 `▁`（HF 有），E4 对照 ids 差一即由此暴露。
+    use tok_normalizers::NormalizerConfig;
+    let mut vocab = BTreeMap::new();
+    vocab.insert("▁".to_string(), 0u32);
+    vocab.insert("hello".to_string(), 1u32);
+    vocab.insert("world".to_string(), 2u32);
+    vocab.insert("[SEP]".to_string(), 3u32);
+    vocab.insert("[UNK]".to_string(), 4u32);
+    let cfg = PipelineConfig {
+        normalizer: Some(NormalizerConfig::Sequence {
+            normalizers: vec![NormalizerConfig::Prepend {
+                prepend: "▁".to_string(),
+            }],
+        }),
+        pre_tokenizer: Some(PreTokenizerConfig::Whitespace),
+        model: ModelConfig::WordLevel {
+            unk_token: "[UNK]".to_string(),
+            vocab,
+        },
+        post_processor: None,
+        decoder: None,
+        added_tokens: vec![AddedToken::new("[SEP]", true)],
+        truncation: None,
+        padding: None,
+        model_max_length: 512,
+        roles: TokenRoles::default(),
+    };
+    let tk = Tokenizer::from_config(&cfg).unwrap();
+    let enc = tk.encode("hello [SEP] world", false).unwrap();
+    // 每个片段各自 prepend：`▁hello` / `[SEP]` / `▁ world`（空白预分词再把 `▁` 与词切开）
+    assert_eq!(enc.tokens, vec!["▁", "hello", "[SEP]", "▁", "world"]);
+    // 片段内偏移仍落在原文上
+    assert_eq!(enc.offsets[1], (0, 5));
+    assert_eq!(enc.offsets[2], (6, 11));
+    assert_eq!(enc.offsets[4], (12, 17));
 }
 
 #[test]
@@ -542,4 +588,134 @@ fn byte_level_split_delimiter_behaviour_is_configurable() {
         SplitDelimiterBehavior::Isolated
     );
     assert!(BehaviorSpec::named("nonsense").parse().is_err());
+}
+
+// ---------------------------------------------------------------- 用例 E6：角色端到端
+
+/// E6：`--role` 声明的角色要同时体现在四处的行为上——
+/// `tokenizer_config.json` / `special_tokens_map.json` 的字段、added token 的 special 标记、
+/// `special_tokens_mask`、`skip_special_tokens` 解码。
+#[test]
+fn explicit_roles_drive_config_mask_and_decode() {
+    let mut cfg = bert_config(true);
+    cfg.post_processor = None;
+    let mut tk = Tokenizer::from_config(&cfg).unwrap();
+
+    let roles = TokenRoles {
+        unk_token: Some("[UNK]".to_string()),
+        bos_token: Some("<s>".to_string()),
+        eos_token: Some("</s>".to_string()),
+        pad_token: Some("[PAD]".to_string()),
+        cls_token: Some("[CLS]".to_string()),
+        sep_token: Some("[SEP]".to_string()),
+        mask_token: Some("[MASK]".to_string()),
+        additional_special_tokens: vec!["<|system|>".to_string()],
+    };
+    tk.set_roles(roles).unwrap();
+
+    // 新声明的 bos/eos 必须拿到连续 id 且落在词表内
+    let bos = tk.vocab_map().get("<s>").copied().expect("bos 未登记");
+    let eos = tk.vocab_map().get("</s>").copied().expect("eos 未登记");
+    assert_ne!(bos, eos);
+
+    let enc = tk.encode("<s><|system|>hello</s>", false).unwrap();
+    let mask: u32 = enc.special_tokens_mask.iter().copied().sum();
+    assert_eq!(mask, 3, "bos/additional/eos 三个 token 都应标为 special");
+    assert!(enc.ids.contains(&bos) && enc.ids.contains(&eos));
+
+    // skip_special_tokens 解码应丢掉全部角色 token，只留正文
+    let text = tk.decode(&enc.ids, true).unwrap();
+    assert!(text.contains("hello"), "正文应保留：{text}");
+    assert!(
+        !text.contains("<s>") && !text.contains("<|system|>"),
+        "特殊 token 未剥离：{text}"
+    );
+
+    // 两份 HF 配置文件都要带上角色
+    let tc = tk.to_tokenizer_config_json().unwrap();
+    assert_eq!(tc["bos_token"], "<s>");
+    assert_eq!(tc["eos_token"], "</s>");
+    assert_eq!(tc["cls_token"], "[CLS]");
+    assert_eq!(tc["sep_token"], "[SEP]");
+    let stm = tk.to_special_tokens_map_json().unwrap();
+    assert_eq!(stm["bos_token"], "<s>");
+    assert!(stm["additional_special_tokens"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|v| v == "<|system|>"));
+}
+
+/// E6：`set_roles` 应拒绝不自洽的角色表（同一 token 占两个槽位）。
+#[test]
+fn set_roles_rejects_duplicate_slot() {
+    let mut tk = Tokenizer::from_config(&bert_config(false)).unwrap();
+    let bad = TokenRoles {
+        unk_token: Some("[UNK]".to_string()),
+        sep_token: Some("[UNK]".to_string()),
+        ..TokenRoles::default()
+    };
+    let err = tk.set_roles(bad).unwrap_err().to_string();
+    assert!(err.contains("[UNK]"), "错误信息应点名冲突 token：{err}");
+    // 失败后角色表不应被改动
+    assert_eq!(tk.roles().sep_token.as_deref(), Some("[SEP]"));
+}
+
+/// E6：`save_pretrained` → `load_pretrained` 必须把角色语义**原样**恢复。
+///
+/// 只读 `tokenizer.json` 时角色只能靠名字推断，`<s>`/`</s>` 这类非常规命名会丢失，
+/// 因此这条用例专门用非 BERT 命名验证"按目录加载"的补齐能力。
+#[test]
+fn load_pretrained_restores_roles_from_config_files() {
+    let cfg = bert_config(true);
+    let mut tk = Tokenizer::from_config(&cfg).unwrap();
+    let roles = TokenRoles {
+        unk_token: Some("[UNK]".to_string()),
+        bos_token: Some("<|begin|>".to_string()),
+        eos_token: Some("<|end|>".to_string()),
+        pad_token: Some("[PAD]".to_string()),
+        cls_token: Some("<|cls|>".to_string()),
+        sep_token: Some("[SEP]".to_string()),
+        mask_token: Some("[MASK]".to_string()),
+        additional_special_tokens: vec!["<|system|>".to_string()],
+    };
+    tk.set_roles(roles.clone()).unwrap();
+    // 用 bos/eos 做模板，验证恢复后 pair 编码仍带后处理
+    tk.set_post_processor(Some(PostProcessorConfig::TemplateProcessing {
+        single: vec![
+            TemplatePiece::special("<|begin|>", 0),
+            TemplatePiece::sequence("A", 0),
+            TemplatePiece::special("<|end|>", 0),
+        ],
+        pair: vec![
+            TemplatePiece::special("<|begin|>", 0),
+            TemplatePiece::sequence("A", 0),
+            TemplatePiece::special("<|end|>", 0),
+            TemplatePiece::sequence("B", 1),
+            TemplatePiece::special("<|end|>", 1),
+        ],
+        special_tokens: Default::default(),
+    }))
+    .unwrap();
+
+    let dir = temp_dir("e6_roles");
+    tk.save_pretrained(&dir).unwrap();
+    let loaded = load_pretrained(&dir).unwrap();
+
+    assert_eq!(loaded.roles(), &roles, "角色表应原样恢复");
+    assert_eq!(loaded.model_max_length(), tk.model_max_length());
+
+    let before = tk.encode_pair("hello", "world", true).unwrap();
+    let after = loaded.encode_pair("hello", "world", true).unwrap();
+    assert_eq!(before.ids, after.ids, "恢复后 pair 编码必须一致");
+    assert_eq!(before.type_ids, after.type_ids);
+    assert_eq!(before.special_tokens_mask, after.special_tokens_mask);
+
+    // 仅按 tokenizer.json 读取时 bos/eos 信息不存在——这正是需要 load_pretrained 的原因
+    let bare = load_tokenizer_json(&dir.join(hf::TOKENIZER_JSON)).unwrap();
+    assert!(
+        bare.roles().bos_token.is_none() || bare.roles().bos_token.as_deref() != Some("<|begin|>"),
+        "纯 tokenizer.json 无法承载非常规命名的 bos 角色，用例前提失效"
+    );
+    std::fs::remove_dir_all(&dir).ok();
 }
