@@ -189,9 +189,11 @@ impl Tokenizer {
         tk.roles = roles;
 
         tk.register_added(&to_register)?;
-        if tk.roles.is_empty() {
-            tk.roles = TokenRoles::infer(&tk.added_tokens);
-        }
+        // 显式配置的角色优先，缺失槽位用 added_tokens 的启发式识别补齐。
+        // 旧实现只在 `roles` 整体为空时才 infer，导致外部模型经 `from_tokenizer_json`
+        // 装配时（roles 全空但 unk 能从 model 推出来）丢掉 [CLS]/[SEP]/[MASK] 等角色。
+        let inferred = TokenRoles::infer(&tk.added_tokens);
+        tk.roles.fill_missing(&inferred);
         tk.post_processor.bind_vocab(tk.model.get_vocab())?;
         Ok(tk)
     }
@@ -237,6 +239,26 @@ impl Tokenizer {
             }
             _ => Vec::new(),
         };
+        // 特殊 token 角色：HF `tokenizer.json` 无独立 roles 字段，从 added_tokens 推断；
+        // unk 缺失时回退到模型节声明的 unk_token（BPE / WordPiece / WordLevel 才带）。
+        let mut roles = TokenRoles::infer(&added_tokens);
+        if roles.unk_token.is_none() {
+            roles.unk_token = match &model_cfg {
+                ModelConfig::Bpe { unk_token, .. } => unk_token.clone(),
+                ModelConfig::WordPiece { unk_token, .. } => Some(unk_token.clone()),
+                ModelConfig::WordLevel { unk_token, .. } => Some(unk_token.clone()),
+                ModelConfig::Unigram { .. } => None,
+            };
+        }
+        // 截断/填充：仅当字段存在且非 null 时解析，解析失败按配置错误上抛（不再静默丢弃）
+        let truncation = match value.get("truncation") {
+            None | Some(Value::Null) => None,
+            Some(v) => Some(serde_json::from_value::<TruncationParams>(v.clone())?),
+        };
+        let padding = match value.get("padding") {
+            None | Some(Value::Null) => None,
+            Some(v) => Some(serde_json::from_value::<PaddingParams>(v.clone())?),
+        };
         let cfg = PipelineConfig {
             normalizer,
             pre_tokenizer,
@@ -244,14 +266,10 @@ impl Tokenizer {
             post_processor,
             decoder,
             added_tokens,
-            truncation: serde_json::from_value(
-                value.get("truncation").cloned().unwrap_or(Value::Null),
-            )
-            .ok(),
-            padding: serde_json::from_value(value.get("padding").cloned().unwrap_or(Value::Null))
-                .ok(),
+            truncation,
+            padding,
             model_max_length: default_max_len(),
-            roles: TokenRoles::default(),
+            roles,
         };
         Self::from_config(&cfg)
     }
