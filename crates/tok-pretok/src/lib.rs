@@ -201,6 +201,8 @@ pub enum PreTokenizerWrapper {
         behavior: SplitDelimiterBehavior,
     },
     Split {
+        /// 原始 pattern：落盘时要还原 `Regex` / `String` 标签
+        spec: PatternSpec,
         regex: FancyRegex,
         behavior: SplitDelimiterBehavior,
         invert: bool,
@@ -217,6 +219,17 @@ impl std::fmt::Debug for PreTokenizerWrapper {
 
 fn fancy(pattern: &str) -> Result<FancyRegex> {
     FancyRegex::new(pattern).map_err(|e| TokenizerError::Regex(format!("{}: {}", pattern, e)))
+}
+
+/// Split 的正则源文本：
+///
+/// * `String`（字面量）模式先转义再编译——`.` `\` `*` 等不被当作元字符；
+/// * `Regex` 模式原样交给 fancy_regex，保留后向引用/环视等扩展语法。
+fn split_pattern_source(pattern: &PatternSpec) -> Result<String> {
+    match pattern {
+        PatternSpec::Literal(_) => Ok(pattern.compile()?.as_str().to_string()),
+        other => Ok(other.as_str().to_string()),
+    }
 }
 
 fn find_all_str(hay: &str, needle: &str) -> Vec<(usize, usize)> {
@@ -276,7 +289,8 @@ impl PreTokenizerWrapper {
                 behavior,
                 invert,
             } => PreTokenizerWrapper::Split {
-                regex: fancy(pattern.as_str())?,
+                spec: pattern.clone(),
+                regex: fancy(&split_pattern_source(pattern)?)?,
                 behavior: behavior.parse()?,
                 invert: *invert,
             },
@@ -414,6 +428,7 @@ impl PreTokenizerWrapper {
                 regex,
                 behavior,
                 invert,
+                ..
             } => {
                 let mut delims = Vec::new();
                 for m in regex.find_iter(ns.normalized()) {
@@ -581,12 +596,13 @@ impl PreTokenizer for PreTokenizerWrapper {
                 "behavior": behavior_name(*behavior),
             })),
             PreTokenizerWrapper::Split {
-                regex,
+                spec,
                 behavior,
                 invert,
+                ..
             } => Ok(serde_json::json!({
                 "type": "Split",
-                "pattern": {"Regex": regex.as_str()},
+                "pattern": spec.to_hf_json(),
                 "behavior": behavior_name(*behavior),
                 "invert": invert,
             })),

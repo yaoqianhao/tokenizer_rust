@@ -104,12 +104,20 @@ pub struct PaddingParams {
     pub pad_token: String,
 }
 
-/// 正则/字面量模式：兼容 HF 的两种写法 `"pattern": "..."` 与 `"pattern": {"Regex": "..."}`。
+/// 正则/字面量模式：HF 的 `pattern` 是带标签枚举，落盘只接受
+/// `{"Regex": "..."}` 与 `{"String": "..."}` 两种形态。
+///
+/// * `Tagged(RegexSpec)` —— `{"Regex": "..."}`，按正则编译；
+/// * `Literal(LiteralSpec)` —— `{"String": "..."}`，按**字面量**匹配（内部转义后编译）；
+/// * `Plain(String)` —— 裸字符串。HF 侧无此形态（`tokenizer.json` 加载会报
+///   `invalid type: string`），仅作旧版本配置文件的兼容入口，语义沿用历史实现
+///   （按正则处理），落盘时统一改写为 `{"Regex": ...}`。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum PatternSpec {
-    Plain(String),
     Tagged(RegexSpec),
+    Literal(LiteralSpec),
+    Plain(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,22 +126,61 @@ pub struct RegexSpec {
     pub regex: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiteralSpec {
+    #[serde(rename = "String")]
+    pub string: String,
+}
+
 impl PatternSpec {
+    /// 正则模式（历史入口，等价于 `{"Regex": regex}`）。
     pub fn new(regex: impl Into<String>) -> Self {
         PatternSpec::Tagged(RegexSpec {
             regex: regex.into(),
         })
     }
+
+    /// 字面量模式（`{"String": ...}`）：内容里的 `.` `\` `*` 等一律不解释。
+    pub fn literal(text: impl Into<String>) -> Self {
+        PatternSpec::Literal(LiteralSpec {
+            string: text.into(),
+        })
+    }
+
+    /// 匹配内容（不含标签）；字面量返回原文，正则返回表达式。
     pub fn as_str(&self) -> &str {
         match self {
             PatternSpec::Plain(s) => s.as_str(),
             PatternSpec::Tagged(r) => r.regex.as_str(),
+            PatternSpec::Literal(l) => l.string.as_str(),
         }
     }
-    /// 编译为 regex（构造失败直接报错，不静默降级为字面量）
+
+    /// 是否为字面量匹配（`String` 模式）。
+    pub fn is_literal(&self) -> bool {
+        matches!(self, PatternSpec::Literal(_))
+    }
+
+    /// 编译为 regex：字面量先 `escape`，保证 `.` 之类的字符不被当作元字符。
+    /// 编译失败直接报错，不静默降级。
     pub fn compile(&self) -> Result<regex::Regex> {
-        regex::Regex::new(self.as_str())
-            .map_err(|e| crate::error::TokenizerError::Regex(format!("{}: {}", self.as_str(), e)))
+        let pattern = match self {
+            PatternSpec::Literal(l) => regex::escape(&l.string),
+            other => other.as_str().to_string(),
+        };
+        regex::Regex::new(&pattern)
+            .map_err(|e| crate::error::TokenizerError::Regex(format!("{}: {}", pattern, e)))
+    }
+
+    /// HF `tokenizer.json` 里的 `pattern` 形态。
+    ///
+    /// 裸字符串（`Plain`）在 HF 侧无法反序列化，落盘时按历史语义写成 `Regex`。
+    pub fn to_hf_json(&self) -> serde_json::Value {
+        match self {
+            PatternSpec::Literal(l) => serde_json::json!({ "String": l.string }),
+            PatternSpec::Tagged(r) => serde_json::json!({ "Regex": r.regex }),
+            PatternSpec::Plain(s) => serde_json::json!({ "Regex": s }),
+        }
     }
 }
 

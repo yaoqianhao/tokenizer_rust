@@ -749,6 +749,63 @@ fn post_processor_rejects_unknown_or_broken_spec() {
 }
 
 #[test]
+fn post_processor_auto_infers_from_declared_roles() {
+    let sb = Sandbox::new("post-auto");
+
+    // 1) 没有声明任何角色 → auto 不猜，落盘 null（与历史 `none` 完全一致）
+    let plain = train_wordpiece(&sb, "auto-none", &[]);
+    assert!(
+        read_json(&plain.join("tokenizer.json"))["post_processor"].is_null(),
+        "未声明角色时 auto 不应凭空启用后处理"
+    );
+
+    // 2) 声明成对的 cls/sep → 自动装配 BertProcessing，并绑定真实词表 id
+    let bert = train_wordpiece(
+        &sb,
+        "auto-bert",
+        &["--role", "cls=<|cls|>", "--role", "sep=<|sep|>"],
+    );
+    let j = read_json(&bert.join("tokenizer.json"));
+    assert_eq!(
+        j["post_processor"]["type"].as_str(),
+        Some("BertProcessing"),
+        "wordpiece 家族应推断为 BertProcessing"
+    );
+    assert_eq!(j["post_processor"]["cls"][0].as_str(), Some("<|cls|>"));
+    assert_eq!(j["post_processor"]["sep"][0].as_str(), Some("<|sep|>"));
+    assert!(
+        j["post_processor"]["cls"][1].is_u64() && j["post_processor"]["sep"][1].is_u64(),
+        "推断结果必须回填真实 id，而不是占位符"
+    );
+
+    // 3) 只声明一半 → 不推断（避免与另一半的模型默认值拼错）
+    let half = train_wordpiece(&sb, "auto-half", &["--role", "cls=<|cls|>"]);
+    assert!(read_json(&half.join("tokenizer.json"))["post_processor"].is_null());
+
+    // 4) --cls/--sep 显式给出同样触发推断
+    let explicit = train_wordpiece(&sb, "auto-explicit", &["--cls", "[CLS]", "--sep", "[SEP]"]);
+    assert_eq!(
+        read_json(&explicit.join("tokenizer.json"))["post_processor"]["type"].as_str(),
+        Some("BertProcessing")
+    );
+
+    // 5) 显式 none 仍然优先于推断
+    let forced_none = train_wordpiece(
+        &sb,
+        "auto-off",
+        &[
+            "--role",
+            "cls=<|cls|>",
+            "--role",
+            "sep=<|sep|>",
+            "--post-processor",
+            "none",
+        ],
+    );
+    assert!(read_json(&forced_none.join("tokenizer.json"))["post_processor"].is_null());
+}
+
+#[test]
 fn decoder_spec_replaces_decoder() {
     let sb = Sandbox::new("decoder");
 

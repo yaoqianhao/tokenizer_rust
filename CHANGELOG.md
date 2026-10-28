@@ -47,6 +47,18 @@
 
 ### Added
 
+- `normalizer = ByteLevel`（GPT-2 可见字节映射，`"你" -> "ä½ł"`），落盘形态与 HF 一致为
+  `{"type":"ByteLevel"}`；`tok-cli` 侧写作 `--normalizer bytelevel`。
+- `Replace` / `Split` 的**字面量（String）模式**：`PatternSpec::Literal` 在匹配前
+  `regex::escape`，因此 `"."`、`"[a-z]+"` 不被解释为元字符；落盘按 HF 语义区分
+  `{"String": ...}` 与 `{"Regex": ...}`，CLI 侧为 `replace:literal=` / `split:literal=`。
+- `tok train --post-processor auto`（现为默认值）：训练结束后仅依据**显式成对声明**的
+  `--role cls` / `--role sep`（或 `--cls` / `--sep`）推断后处理——`WordPiece` / `WordLevel`
+  推断为 `BertProcessing`，其余（BPE / Unigram）推断为 `RobertaProcessing`；只声明一半或
+  都不声明时保持无后处理。显式传 `--post-processor none` 仍可关闭推断。
+- `crates/tok-pipeline/tests/data/roles_custom/`：自定义角色（8 个角色全部改写为 `<|...|>`
+  形态）＋自动推断后处理的完整 `save_pretrained` 三件套快照；配套 golden 测试锁定
+  「目录重载恢复角色」「单句 id/tokens/offsets」「pair type_ids 分段」三组 HF 期望值。
 - `tok-cli`：`tok compare` 子命令（与 HF 产物逐条比对，支持 `--strict`）。
 - `tok-cli` 端到端集成测试 13 例，直接 spawn `CARGO_BIN_EXE_tok-cli`，覆盖
   `train / encode / decode / inspect / compare`，报错契约锁定为「`错误:` 开头 + 非零退出码」。

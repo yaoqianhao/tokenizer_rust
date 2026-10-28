@@ -27,6 +27,11 @@ pub enum NormalizerConfig {
     StripAccents,
     #[serde(rename = "Strip")]
     Strip,
+    /// 字节级重映射（GPT-2 风格）：`你好` → `ä½ł` 这类可打印化表示。
+    ///
+    /// HF 的该 normalizer 无参数，落盘形如 `{"type": "ByteLevel"}`。
+    #[serde(rename = "ByteLevel")]
+    ByteLevel,
     #[serde(rename = "Replace")]
     Replace {
         pattern: PatternSpec,
@@ -48,7 +53,13 @@ pub enum NormalizerWrapper {
     Nfkd,
     StripAccents,
     Strip,
-    Replace(Regex, String),
+    ByteLevel,
+    Replace {
+        /// 原始 pattern（落盘时必须还原 `Regex` / `String` 标签）
+        spec: PatternSpec,
+        re: Regex,
+        content: String,
+    },
     Prepend(String),
     Sequence(Vec<NormalizerWrapper>),
     /// 扩展点：第三方自定义规范化器（无法导出为 HF 配置，导出时显式报错）
@@ -76,9 +87,12 @@ impl NormalizerWrapper {
             NormalizerConfig::Nfkd => NormalizerWrapper::Nfkd,
             NormalizerConfig::StripAccents => NormalizerWrapper::StripAccents,
             NormalizerConfig::Strip => NormalizerWrapper::Strip,
-            NormalizerConfig::Replace { pattern, content } => {
-                NormalizerWrapper::Replace(pattern.compile()?, content.clone())
-            }
+            NormalizerConfig::ByteLevel => NormalizerWrapper::ByteLevel,
+            NormalizerConfig::Replace { pattern, content } => NormalizerWrapper::Replace {
+                spec: pattern.clone(),
+                re: pattern.compile()?,
+                content: content.clone(),
+            },
             NormalizerConfig::Prepend { prepend } => NormalizerWrapper::Prepend(prepend.clone()),
             NormalizerConfig::Sequence { normalizers } => {
                 let mut v = Vec::with_capacity(normalizers.len());
@@ -132,7 +146,11 @@ impl tok_core::Normalizer for NormalizerWrapper {
                 ns.strip();
                 ns
             }
-            NormalizerWrapper::Replace(re, content) => {
+            NormalizerWrapper::ByteLevel => {
+                ns.byte_level_expand();
+                ns
+            }
+            NormalizerWrapper::Replace { re, content, .. } => {
                 ns.replace_all(re, content);
                 ns
             }
@@ -165,9 +183,10 @@ impl tok_core::Normalizer for NormalizerWrapper {
             NormalizerWrapper::Strip => {
                 Ok(serde_json::json!({"type": "Strip", "strip_left": true, "strip_right": true}))
             }
-            NormalizerWrapper::Replace(re, content) => Ok(serde_json::json!({
+            NormalizerWrapper::ByteLevel => Ok(serde_json::json!({"type": "ByteLevel"})),
+            NormalizerWrapper::Replace { spec, content, .. } => Ok(serde_json::json!({
                 "type": "Replace",
-                "pattern": {"Regex": re.as_str()},
+                "pattern": spec.to_hf_json(),
                 "content": content,
             })),
             NormalizerWrapper::Prepend(s) => {
@@ -197,7 +216,8 @@ impl tok_core::Normalizer for NormalizerWrapper {
             NormalizerWrapper::Nfkd => "NFKD",
             NormalizerWrapper::StripAccents => "StripAccents",
             NormalizerWrapper::Strip => "Strip",
-            NormalizerWrapper::Replace(_, _) => "Replace",
+            NormalizerWrapper::ByteLevel => "ByteLevel",
+            NormalizerWrapper::Replace { .. } => "Replace",
             NormalizerWrapper::Prepend(_) => "Prepend",
             NormalizerWrapper::Sequence(_) => "Sequence",
             NormalizerWrapper::Custom(_) => "Custom",
@@ -264,5 +284,89 @@ mod tests {
         assert_eq!(v["type"], "Replace");
         assert_eq!(v["pattern"]["Regex"], "x");
         assert_eq!(v["content"], "y");
+    }
+
+    #[test]
+    fn replace_literal_does_not_interpret_metachars() {
+        // String 模式：`.` 是普通字符，只命中真正的句点
+        let cfg = NormalizerConfig::Replace {
+            pattern: PatternSpec::literal("."),
+            content: "_".into(),
+        };
+        let n = NormalizerWrapper::build(&cfg).unwrap();
+        assert_eq!(
+            n.normalize(NormalizedString::new("a.b")).normalized(),
+            "a_b"
+        );
+
+        // 对照 Regex 模式：`.` 命中任意字符，四字符全被替换
+        let re_cfg = NormalizerConfig::Replace {
+            pattern: PatternSpec::new("."),
+            content: "_".into(),
+        };
+        let re_n = NormalizerWrapper::build(&re_cfg).unwrap();
+        assert_eq!(
+            re_n.normalize(NormalizedString::new("a.b")).normalized(),
+            "___"
+        );
+    }
+
+    #[test]
+    fn replace_literal_config_json_uses_string_tag() {
+        let cfg = NormalizerConfig::Replace {
+            pattern: PatternSpec::literal("\u{a0}"),
+            content: " ".into(),
+        };
+        let v = NormalizerWrapper::build(&cfg)
+            .unwrap()
+            .to_config_json()
+            .unwrap();
+        assert_eq!(v["pattern"]["String"], "\u{a0}");
+        assert!(v["pattern"].get("Regex").is_none());
+    }
+
+    /// 落盘 → 反序列化 往返：`String` 标签不能被重读成正则。
+    #[test]
+    fn pattern_spec_roundtrip_keeps_literal_tag() {
+        let cfg = NormalizerConfig::Replace {
+            pattern: PatternSpec::literal("[a-z]+"),
+            content: "#".into(),
+        };
+        let v = NormalizerWrapper::build(&cfg)
+            .unwrap()
+            .to_config_json()
+            .unwrap();
+        let back: NormalizerConfig = serde_json::from_value(v).unwrap();
+        match &back {
+            NormalizerConfig::Replace { pattern, .. } => {
+                assert!(pattern.is_literal(), "String 模式重读后必须仍是字面量");
+                assert_eq!(pattern.as_str(), "[a-z]+");
+            }
+            other => panic!("期望 Replace，得到 {:?}", other),
+        }
+        // 字面量语义：方括号与加号都不解释，只命中原文 "[a-z]+"
+        let n = NormalizerWrapper::build(&back).unwrap();
+        assert_eq!(
+            n.normalize(NormalizedString::new("x [a-z]+ y"))
+                .normalized(),
+            "x # y"
+        );
+    }
+
+    #[test]
+    fn byte_level_expands_to_gpt2_visible_bytes() {
+        let n = NormalizerWrapper::build(&NormalizerConfig::ByteLevel).unwrap();
+        // '你' = E4 BD A0 → ä½ł（HF ByteLevel 的可打印映射）
+        let out = n.normalize(NormalizedString::new("你"));
+        assert_eq!(out.normalized(), "ä½ł");
+        // 字节级映射是可逆的一对一变换（1 字节 ↔ 1 映射字符），不属于信息退化
+        assert_eq!(out.normalized().chars().count(), "你".len());
+        assert!(!out.is_degraded());
+        // 映射后可回推原文偏移（偏移量一律是 UTF-8 字节）
+        let o = out.convert_offsets((0, out.normalized().len())).unwrap();
+        assert_eq!((o.start, o.end), (0, 3));
+
+        let v = n.to_config_json().unwrap();
+        assert_eq!(v, serde_json::json!({"type": "ByteLevel"}));
     }
 }

@@ -1,0 +1,12 @@
+{
+  "additional_special_tokens": [
+    "<|system|>"
+  ],
+  "bos_token": "<|begin|>",
+  "cls_token": "<|cls|>",
+  "eos_token": "<|end|>",
+  "mask_token": "<|mask|>",
+  "pad_token": "[PAD]",
+  "sep_token": "<|sep|>",
+  "unk_token": "[UNK]"
+}

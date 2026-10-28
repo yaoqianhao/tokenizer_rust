@@ -88,9 +88,9 @@ pub struct TrainArgs {
     /// Unigram：每个剪枝阶段内的 EM 迭代次数
     #[arg(long = "sub-iterations", default_value_t = 2)]
     pub sub_iterations: usize,
-    /// 后处理器：none（默认）| bert | roberta | bert-template |
-    /// `template:<single>[|<pair>]`（`$A`/`$B` 为序列占位，其余按特殊 token 字面值）
-    #[arg(long = "post-processor", default_value = "none")]
+    /// 后处理器：auto（默认，按 --role/--cls/--sep 显式声明推断）| none | bert | roberta |
+    /// bert-template | `template:<single>[|<pair>]`（`$A`/`$B` 为序列占位，其余按特殊 token 字面值）
+    #[arg(long = "post-processor", default_value = "auto")]
     pub post_processor: String,
     /// 后处理模板用的 CLS 字面值（缺省按模型推断：[CLS] 或 <s>）
     #[arg(long)]
@@ -175,12 +175,23 @@ pub fn run_train(args: TrainArgs) -> Result<()> {
         parse_decoder_spec(&args.decoder, args.byte_fallback)?
     };
     // 后处理器在训练后替换，但模板引用的特殊 token 必须先进入训练期词表
-    let post_cfg = parse_post_processor_spec(
-        &args.post_processor,
-        &args.model,
-        args.cls.as_deref(),
-        args.sep.as_deref(),
-    )?;
+    let post_cfg = if args.post_processor.trim() == "auto" {
+        // 自动推断：只依据用户**显式声明**的角色（--role / --cls / --sep），
+        // 不拿模型默认字面值去猜，避免凭空改写既有产物的 ids。
+        infer_post_processor(
+            &args.model,
+            &roles,
+            args.cls.as_deref(),
+            args.sep.as_deref(),
+        )
+    } else {
+        parse_post_processor_spec(
+            &args.post_processor,
+            &args.model,
+            args.cls.as_deref(),
+            args.sep.as_deref(),
+        )?
+    };
     if let Some(cfg) = &post_cfg {
         for s in tok_post::PostProcessorWrapper::build(cfg)?.required_specials() {
             if !specials.iter().any(|x| x == &s) {
@@ -915,16 +926,31 @@ fn parse_normalizer_node(node: &str) -> Result<NormalizerConfig> {
         "nfkd" => NormalizerConfig::Nfkd,
         "strip-accents" => NormalizerConfig::StripAccents,
         "strip" => NormalizerConfig::Strip,
+        "bytelevel" | "byte-level" | "byte_level" => NormalizerConfig::ByteLevel,
         "replace" => {
-            let pattern = take_arg(&args, &["pattern", "regex"]).ok_or_else(|| {
-                TokenizerError::config(
-                    "`--normalizer replace:...` 需要 pattern=<regex>（例：replace:pattern=\\s+;content= ）"
-                        .to_string(),
-                )
-            })?;
+            // 两种 pattern 形态：literal=<字面量>（HF `{"String": ...}`）
+            // 与 pattern=<regex>（HF `{"Regex": ...}`）。
+            let spec = if let Some(literal) = take_arg(&args, &["literal", "string"]) {
+                if take_arg(&args, &["pattern", "regex"]).is_some() {
+                    return Err(TokenizerError::config(
+                        "`--normalizer replace:...` 的 literal= 与 pattern= 互斥，只能二选一"
+                            .to_string(),
+                    ));
+                }
+                tok_core::PatternSpec::literal(literal)
+            } else {
+                let pattern = take_arg(&args, &["pattern", "regex"]).ok_or_else(|| {
+                    TokenizerError::config(
+                        "`--normalizer replace:...` 需要 literal=<字面量> 或 pattern=<regex>\
+                         （例：replace:literal=.;content=_ / replace:pattern=\\s+;content= ）"
+                            .to_string(),
+                    )
+                })?;
+                tok_core::PatternSpec::new(pattern)
+            };
             let content = take_arg(&args, &["content", "with"]).unwrap_or_default();
             NormalizerConfig::Replace {
-                pattern: tok_core::PatternSpec::new(pattern),
+                pattern: spec,
                 content,
             }
         }
@@ -939,7 +965,8 @@ fn parse_normalizer_node(node: &str) -> Result<NormalizerConfig> {
         other => {
             return Err(TokenizerError::config(format!(
                 "未知 --normalizer: '{}'（可选 lowercase / nfc / nfd / nfkc / nfkd / strip-accents / \
-                 strip / replace:pattern=<regex>;content=<s> / prepend:prepend=<s>）",
+                 strip / bytelevel / replace:literal=<s>;content=<s> / \
+                 replace:pattern=<regex>;content=<s> / prepend:prepend=<s>）",
                 other
             )));
         }
@@ -1024,14 +1051,20 @@ fn parse_pretok_node(node: &str) -> Result<PreTokenizerConfig> {
             ),
         },
         "split" => {
-            let pattern = take_arg(&args, &["pattern", "regex"]).ok_or_else(|| {
-                TokenizerError::config(
-                    "`--pre-tokenizer split:...` 需要 pattern=<regex>（逗号请写成 \\x2C，避免与 sequence 分隔冲突）"
-                        .to_string(),
-                )
-            })?;
+            let spec = if let Some(literal) = take_arg(&args, &["literal", "string"]) {
+                tok_core::PatternSpec::literal(literal)
+            } else {
+                let pattern = take_arg(&args, &["pattern", "regex"]).ok_or_else(|| {
+                    TokenizerError::config(
+                        "`--pre-tokenizer split:...` 需要 literal=<字面量> 或 pattern=<regex>\
+                         （逗号请写成 \\x2C，避免与 sequence 分隔冲突）"
+                            .to_string(),
+                    )
+                })?;
+                tok_core::PatternSpec::new(pattern)
+            };
             PreTokenizerConfig::Split {
-                pattern: tok_core::PatternSpec::new(pattern),
+                pattern: spec,
                 behavior: BehaviorSpec::named(
                     &take_arg(&args, &["behavior"]).unwrap_or_else(|| "removed".to_string()),
                 ),
@@ -1142,10 +1175,46 @@ fn build_decoder(model: &str, pre: &str, byte_fallback: bool) -> Option<DecoderC
     }
 }
 
+/// 后处理器自动推断（`--post-processor auto`，默认值）。
+///
+/// 仅在用户**显式**给出了成对的 CLS/SEP 时才装配：
+/// * 来源优先级：`--cls` / `--sep` > `--role cls=...` / `--role sep=...`；
+/// * 只给其中一个 → 不推断（宁可不加，也不与另一半的自定义角色拼错）；
+/// * 都不给 → 返回 `None`，与历史 `none` 行为完全一致，不改变既有产物。
+///
+/// 装配形态跟随模型家族：WordPiece / WordLevel 走 `BertProcessing`，
+/// 其余（BPE / Unigram）按 RoBERTa 约定走 `RobertaProcessing`。
+fn infer_post_processor(
+    model: &str,
+    roles: &TokenRoles,
+    cls: Option<&str>,
+    sep: Option<&str>,
+) -> Option<PostProcessorConfig> {
+    let cls = cls
+        .map(str::to_string)
+        .or_else(|| roles.cls_token.clone())?;
+    let sep = sep
+        .map(str::to_string)
+        .or_else(|| roles.sep_token.clone())?;
+    Some(match model {
+        "wordpiece" | "wordlevel" => PostProcessorConfig::BertProcessing {
+            sep: (sep, 0),
+            cls: (cls, 0),
+        },
+        _ => PostProcessorConfig::RobertaProcessing {
+            sep: (sep, 0),
+            cls: (cls, 0),
+            trim_offsets: true,
+            add_prefix_space: true,
+        },
+    })
+}
+
 /// 后处理器 spec → 配置（`none` 返回 `None`）。
 ///
 /// 支持：
 /// * `none` / 空串：不启用后处理
+/// * `auto`：按显式声明的角色推断（见 [`infer_post_processor`]）
 /// * `bert` / `roberta`：走对应的内置处理器（`--cls` / `--sep` 覆盖字面值）
 /// * `bert-template`：与 `bert` 语义等价的手写模板，用于 Bert ↔ Template 自洽校验
 /// * `template:<single>[|<pair>]`：`$A` / `$B` 为序列占位，其余 token 按特殊 token 字面值；
@@ -1196,7 +1265,7 @@ fn parse_post_processor_spec(
         other => {
             let body = other.strip_prefix("template:").ok_or_else(|| {
                 TokenizerError::config(format!(
-                    "未知 --post-processor: '{}'（可选 none / bert / roberta / bert-template / template:...）",
+                    "未知 --post-processor: '{}'（可选 auto / none / bert / roberta / bert-template / template:...）",
                     other
                 ))
             })?;
