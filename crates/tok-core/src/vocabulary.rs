@@ -50,18 +50,66 @@ fn is_word_char(c: char) -> bool {
 }
 
 /// 后加 token 的运行时视图：负责"最长左匹配"式前置切分（S1）。
-#[derive(Debug, Clone, Default)]
+///
+/// 索引说明：`split` 是 encode 热路径，原先每个字节位置都要遍历全部后加 token 并逐字节比较，
+/// 且每次调用都重建 + 排序候选表；token 数量增加时吞吐会线性下滑。这里把排序结果与
+/// 「首字节 → 候选下标」索引在装配期算好，热路径只对首字节命中位置做实际比较。
+#[derive(Debug, Clone)]
 pub struct AddedVocabulary {
     tokens: Vec<(AddedToken, u32)>,
+    /// 候选下标，按（内容长度降序, id 升序）排好——保证命中即最长左匹配。
+    order: Vec<usize>,
+    /// 首字节 → `order` 中首字节相同的候选下标。
+    first: [Vec<usize>; 256],
+}
+
+impl Default for AddedVocabulary {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AddedVocabulary {
     pub fn new() -> Self {
-        Self { tokens: Vec::new() }
+        Self {
+            tokens: Vec::new(),
+            order: Vec::new(),
+            first: std::array::from_fn(|_| Vec::new()),
+        }
     }
 
     pub fn add(&mut self, token: AddedToken, id: u32) {
         self.tokens.push((token, id));
+        self.reindex();
+    }
+
+    /// 重建索引（只在装配期调用；token 数量是常量级小值）。
+    fn reindex(&mut self) {
+        let tokens = &self.tokens;
+        self.order = (0..tokens.len()).collect();
+        self.order.sort_by(|&a, &b| {
+            let (ta, ia) = &tokens[a];
+            let (tb, ib) = &tokens[b];
+            tb.content.len().cmp(&ta.content.len()).then(ia.cmp(ib))
+        });
+        for bucket in self.first.iter_mut() {
+            bucket.clear();
+        }
+        let by_first: Vec<(u8, usize)> = self
+            .order
+            .iter()
+            .filter_map(|&idx| {
+                self.tokens[idx]
+                    .0
+                    .content
+                    .as_bytes()
+                    .first()
+                    .map(|b| (*b, idx))
+            })
+            .collect();
+        for (b, idx) in by_first {
+            self.first[b as usize].push(idx);
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -104,20 +152,16 @@ impl AddedVocabulary {
                 id: None,
             }];
         }
-        let mut pats: Vec<(&str, u32, &AddedToken)> = self
-            .tokens
-            .iter()
-            .map(|(t, id)| (t.content.as_str(), *id, t))
-            .collect();
-        pats.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then(a.1.cmp(&b.1)));
-
         let bytes = text.as_bytes();
         let mut out: Vec<SplitUnit> = Vec::new();
         let mut cursor = 0usize;
         let mut i = 0usize;
         while i < bytes.len() {
             let mut matched: Option<(usize, u32, &AddedToken)> = None;
-            for (content, id, tok) in pats.iter() {
+            // 只扫首字节命中的候选；bucket 内按（长度降序, id 升序）排好，首个命中即最长。
+            for &idx in self.first[bytes[i] as usize].iter() {
+                let (tok, id) = &self.tokens[idx];
+                let content = tok.content.as_str();
                 let cb = content.as_bytes();
                 if bytes.len() >= i + cb.len() && &bytes[i..i + cb.len()] == cb {
                     if tok.single_word {
@@ -459,6 +503,45 @@ mod tests {
         assert_eq!(parts[1].id, Some(3));
         assert_eq!((parts[1].start, parts[1].end), (2, 7));
         assert_eq!(parts[2].text, "there");
+    }
+
+    #[test]
+    fn split_prefers_longest_then_smallest_id() {
+        // 索引化后必须仍满足「最长左匹配优先；同长度按 id 升序」的旧语义。
+        let mut added = AddedVocabulary::new();
+        added.add(AddedToken::new("<s", true), 9);
+        added.add(AddedToken::new("<s>", true), 4);
+        added.add(AddedToken::new("<s>", true), 2);
+        let parts = added.split("<s>x");
+        assert_eq!(parts[0].id, Some(2), "同长度应取更小 id");
+        assert_eq!((parts[0].start, parts[0].end), (0, 3));
+        assert_eq!(parts[1].text, "x");
+    }
+
+    #[test]
+    fn split_index_follows_later_additions() {
+        // 索引在 `add` 时重建：后加的 token 也必须能命中。
+        let mut added = AddedVocabulary::new();
+        added.add(AddedToken::new("<a>", true), 0);
+        assert_eq!(added.split("x<b>y").len(), 1);
+        added.add(AddedToken::new("<b>", true), 1);
+        let parts = added.split("x<b>y");
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[1].id, Some(1));
+        assert_eq!(parts[1].text, "<b>");
+    }
+
+    #[test]
+    fn split_ignores_non_matching_first_bytes() {
+        // 首字节分桶不能漏掉「出现在文本中段」的 token，也不能把不匹配的正文切碎。
+        let mut added = AddedVocabulary::new();
+        added.add(AddedToken::new("<|end|>", true), 7);
+        let parts = added.split("hello <|end|> world <|end|>");
+        assert_eq!(parts.len(), 4, "末尾无残留正文时不应产生空段");
+        assert_eq!(parts[0].text, "hello ");
+        assert_eq!(parts[1].id, Some(7));
+        assert_eq!(parts[2].text, " world ");
+        assert_eq!(parts[3].id, Some(7));
     }
 
     #[test]
