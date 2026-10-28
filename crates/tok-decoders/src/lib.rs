@@ -58,8 +58,6 @@ pub enum DecoderConfig {
     },
     #[serde(rename = "ByteFallback")]
     ByteFallback,
-    #[serde(rename = "Fuse")]
-    Fuse { decoders: Vec<DecoderConfig> },
     #[serde(rename = "Sequence")]
     Sequence { decoders: Vec<DecoderConfig> },
     #[serde(rename = "Strip")]
@@ -292,7 +290,7 @@ impl Decoder for DecoderWrapper {
                 flush(&mut pending, &mut out);
                 Ok(out)
             }
-            Some(DecoderConfig::Fuse { decoders }) | Some(DecoderConfig::Sequence { decoders }) => {
+            Some(DecoderConfig::Sequence { decoders }) => {
                 let mut cur = tokens;
                 for d in decoders {
                     cur = DecoderWrapper::build(d)?.decode_chain(cur)?;
@@ -336,7 +334,6 @@ impl Decoder for DecoderWrapper {
             Some(DecoderConfig::CTC { .. }) => "CTC",
             Some(DecoderConfig::Replace { .. }) => "Replace",
             Some(DecoderConfig::ByteFallback) => "ByteFallback",
-            Some(DecoderConfig::Fuse { .. }) => "Fuse",
             Some(DecoderConfig::Sequence { .. }) => "Sequence",
             Some(DecoderConfig::Strip { .. }) => "Strip",
         }

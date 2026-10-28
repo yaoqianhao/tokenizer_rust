@@ -378,13 +378,15 @@ fn bert_template(
     add_special: bool,
     pairs: bool,
 ) -> Vec<TemplatePiece> {
+    // 注意：`(token, u32)` 的第二项在 HF 配置里是**词表 id**，不是 type_id。
+    // type_id 完全由段决定：A 段（含 [CLS] 与首个 [SEP]）为 0，B 段及其 [SEP] 为 1。
     let mut v = Vec::new();
     if add_special {
-        v.push(TemplatePiece::special(cls.0.clone(), cls.1));
+        v.push(TemplatePiece::special(cls.0.clone(), 0));
     }
     v.push(TemplatePiece::sequence("A", 0));
     if add_special {
-        v.push(TemplatePiece::special(sep.0.clone(), sep.1));
+        v.push(TemplatePiece::special(sep.0.clone(), 0));
     }
     if pairs {
         // HF `BertProcessing` 的 pair 形态：`[CLS] A [SEP] B [SEP]`，
@@ -403,22 +405,23 @@ fn roberta_template(
     add_special: bool,
     pairs: bool,
 ) -> Vec<TemplatePiece> {
+    // 同上：第二项是词表 id，RoBERTa 的 type_id 恒为 0。
     let mut v = Vec::new();
     if add_special {
-        v.push(TemplatePiece::special(cls.0.clone(), cls.1));
+        v.push(TemplatePiece::special(cls.0.clone(), 0));
     }
     v.push(TemplatePiece::sequence("A", 0));
     if add_special {
-        v.push(TemplatePiece::special(sep.0.clone(), sep.1));
+        v.push(TemplatePiece::special(sep.0.clone(), 0));
     }
     if pairs {
         // HF `RobertaProcessing` 的 pair 形态：`<s> A </s> </s> B </s>`，type_id 全 0。
         if add_special {
-            v.push(TemplatePiece::special(sep.0.clone(), sep.1));
+            v.push(TemplatePiece::special(sep.0.clone(), 0));
         }
         v.push(TemplatePiece::sequence("B", 0));
         if add_special {
-            v.push(TemplatePiece::special(sep.0.clone(), sep.1));
+            v.push(TemplatePiece::special(sep.0.clone(), 0));
         }
     }
     v

@@ -3,6 +3,8 @@
 //! L2 预分词层实现。契约：切分后 `splits` 的拼接必须等于 normalized 全文，
 //! 且每个切分片都能映射回原始偏移（`convert_offsets`）。
 
+use std::collections::BTreeMap;
+
 use fancy_regex::Regex as FancyRegex;
 use serde::{Deserialize, Serialize};
 use tok_core::{
@@ -13,37 +15,104 @@ use unicode_general_category::{get_general_category, GeneralCategory};
 // 重新导出核心层的分隔符行为，L2 使用者无需直接依赖 `tok-core`。
 pub use tok_core::SplitDelimiterBehavior;
 
-/// 分隔符行为：兼容 HF 的 `"behavior": "removed"` 与 `{"SplitDelimiterBehavior":"removed"}`。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(untagged)]
+/// 分隔符行为：兼容 HF 的 `"behavior": "Isolated"`、小写写法与
+/// `{"SplitDelimiterBehavior":"isolated"}` 形式。
+///
+/// 落盘时统一序列化成 HF 的 PascalCase 枚举名——HF 的 `tokenizers` 用
+/// `#[serde(rename_all = "PascalCase")]` 反序列化该枚举，写 `"isolated"` 会导致
+/// `tokenizer.json` 直接加载失败（E3 对照时踩到的坑）。
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BehaviorSpec {
     Plain(String),
-    Tagged {
-        #[serde(rename = "SplitDelimiterBehavior")]
-        behavior: String,
-    },
+    Tagged { behavior: String },
 }
 
 impl BehaviorSpec {
     pub fn named(s: &str) -> Self {
         BehaviorSpec::Plain(s.to_string())
     }
-    pub fn parse(&self) -> Result<SplitDelimiterBehavior> {
-        let s = match self {
+
+    /// 原始写法（可能为小写/下划线形式）。
+    pub fn raw(&self) -> &str {
+        match self {
             BehaviorSpec::Plain(s) => s.as_str(),
             BehaviorSpec::Tagged { behavior } => behavior.as_str(),
-        };
-        match s {
-            "removed" | "Removed" => Ok(SplitDelimiterBehavior::Removed),
-            "isolated" | "Isolated" => Ok(SplitDelimiterBehavior::Isolated),
-            "merged_with_previous" | "MergedWithPrevious" => {
-                Ok(SplitDelimiterBehavior::MergedWithPrevious)
-            }
-            "merged_with_next" | "MergedWithNext" => Ok(SplitDelimiterBehavior::MergedWithNext),
-            other => Err(TokenizerError::config(format!(
-                "未知 SplitDelimiterBehavior: {}",
-                other
+        }
+    }
+
+    /// HF 兼容的规范名；未知写法返回 `None`，由 `parse` 决定如何报错。
+    pub fn canonical(&self) -> Option<&'static str> {
+        canonical_behavior(self.raw())
+    }
+
+    pub fn parse(&self) -> Result<SplitDelimiterBehavior> {
+        match canonical_behavior(self.raw()) {
+            Some("Removed") => Ok(SplitDelimiterBehavior::Removed),
+            Some("Isolated") => Ok(SplitDelimiterBehavior::Isolated),
+            Some("MergedWithPrevious") => Ok(SplitDelimiterBehavior::MergedWithPrevious),
+            Some("MergedWithNext") => Ok(SplitDelimiterBehavior::MergedWithNext),
+            Some("Contiguous") => Err(TokenizerError::config(
+                "behavior=contiguous 尚未实现（HF 的 Contiguous 变体暂不支持）".to_string(),
+            )),
+            _ => Err(TokenizerError::config(format!(
+                "未知 SplitDelimiterBehavior: {}（可选 removed / isolated / merged_with_previous / merged_with_next）",
+                self.raw()
             ))),
+        }
+    }
+}
+
+/// 名称归一化：大小写、连字符、下划线都不敏感。
+fn canonical_behavior(raw: &str) -> Option<&'static str> {
+    let key: String = raw
+        .chars()
+        .filter(|c| *c != '_' && *c != '-')
+        .flat_map(|c| c.to_lowercase())
+        .collect();
+    match key.as_str() {
+        "removed" => Some("Removed"),
+        "isolated" => Some("Isolated"),
+        "mergedwithprevious" => Some("MergedWithPrevious"),
+        "mergedwithnext" => Some("MergedWithNext"),
+        "contiguous" => Some("Contiguous"),
+        _ => None,
+    }
+}
+
+impl Serialize for BehaviorSpec {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.canonical().unwrap_or_else(|| self.raw()))
+    }
+}
+
+impl<'de> Deserialize<'de> for BehaviorSpec {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Plain(String),
+            Keyed(BTreeMap<String, String>),
+        }
+        match Repr::deserialize(deserializer)? {
+            Repr::Plain(s) => Ok(BehaviorSpec::Plain(s)),
+            Repr::Keyed(map) => {
+                let behavior = map
+                    .get("SplitDelimiterBehavior")
+                    .or_else(|| map.get("value"))
+                    .or_else(|| map.get("behavior"))
+                    .cloned()
+                    .ok_or_else(|| {
+                        serde::de::Error::custom(
+                            "behavior 对象缺少 SplitDelimiterBehavior/value 字段",
+                        )
+                    })?;
+                Ok(BehaviorSpec::Tagged { behavior })
+            }
         }
     }
 }
@@ -551,12 +620,14 @@ impl PreTokenizer for PreTokenizerWrapper {
     }
 }
 
+/// 导出名必须用 HF 的 PascalCase 枚举名，否则 `tokenizer.json` 无法被
+/// `tokenizers` 反序列化（`unknown variant`）。
 fn behavior_name(b: SplitDelimiterBehavior) -> &'static str {
     match b {
-        SplitDelimiterBehavior::Removed => "removed",
-        SplitDelimiterBehavior::Isolated => "isolated",
-        SplitDelimiterBehavior::MergedWithPrevious => "merged_with_previous",
-        SplitDelimiterBehavior::MergedWithNext => "merged_with_next",
+        SplitDelimiterBehavior::Removed => "Removed",
+        SplitDelimiterBehavior::Isolated => "Isolated",
+        SplitDelimiterBehavior::MergedWithPrevious => "MergedWithPrevious",
+        SplitDelimiterBehavior::MergedWithNext => "MergedWithNext",
     }
 }
 

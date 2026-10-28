@@ -316,6 +316,25 @@ impl Vocabulary {
         Ok(())
     }
 
+    /// 把已在后加视图中的 token **就地**升级为 special（id 不变）。
+    ///
+    /// 场景（E6）：用户先用 `--special` 把一个 token 当普通后加 token 加进来，
+    /// 随后又声明它为 `cls`/`sep` 等角色。HF 中角色 token 必然是 special，
+    /// 因此需要在**不动 id** 的前提下翻标记，而不能重加一个同内容的 token。
+    /// 返回是否命中既有后加 token。
+    pub fn promote_added_special(&mut self, content: &str) -> bool {
+        if let Some((token, _)) = self
+            .added
+            .tokens
+            .iter_mut()
+            .find(|(t, _)| t.content == content)
+        {
+            token.special = true;
+            return true;
+        }
+        false
+    }
+
     pub fn added_tokens_with_ids(&self) -> Vec<AddedTokenWithId> {
         self.added.with_ids()
     }

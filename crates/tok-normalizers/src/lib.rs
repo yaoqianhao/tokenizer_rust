@@ -159,7 +159,12 @@ impl tok_core::Normalizer for NormalizerWrapper {
             NormalizerWrapper::Nfkc => Ok(serde_json::json!({"type": "NFKC"})),
             NormalizerWrapper::Nfkd => Ok(serde_json::json!({"type": "NFKD"})),
             NormalizerWrapper::StripAccents => Ok(serde_json::json!({"type": "StripAccents"})),
-            NormalizerWrapper::Strip => Ok(serde_json::json!({"type": "Strip"})),
+            // HF 的 Strip 配置要求 strip_left / strip_right 两个必填布尔字段，
+            // 缺失会导致 tokenizer.json 加载报 `missing field strip_left`。
+            // 本实现 `ns.strip()` 同时裁剪两端，故双双为 true。
+            NormalizerWrapper::Strip => {
+                Ok(serde_json::json!({"type": "Strip", "strip_left": true, "strip_right": true}))
+            }
             NormalizerWrapper::Replace(re, content) => Ok(serde_json::json!({
                 "type": "Replace",
                 "pattern": {"Regex": re.as_str()},
