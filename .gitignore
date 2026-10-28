@@ -1,3 +1,48 @@
+# ============ 构建产物 ============
 target/
+target_bench/
 *.rs.bk
+
+# ============ 运行/导出产物 ============
 outputs/
+
+# ============ 编译、测试、调试日志（根目录历史残留，交付文件不放根目录）============
+*.log
+/*_e.log
+/*_err.txt
+/*_out.txt
+/t_*.txt
+/test_*.txt
+/wp_*.txt
+/sc_*.txt
+/d_*.txt
+/err_capture.txt
+/build_*.txt
+/temp_*.log
+/temp_*.txt
+
+# ============ 临时目录与临时脚本 ============
+/temp/
+/temp_*/
+/temp_*.py
+scratch_*
+
+# ============ 编辑器 / 系统 ============
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ============ Python（parity 比对脚本）============
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# ============ 覆盖率 / 性能剖析 ============
+*.profraw
+*.profdata
+lcov.info
+perf.data*

@@ -1,5 +1,0 @@
-   Compiling tok-core v0.1.0 (E:\tokenizer_rust\crates\tok-core)
-   Compiling tok-models v0.1.0 (E:\tokenizer_rust\crates\tok-models)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.84s
-     Running unittests src\lib.rs (target\debug\deps\tok_models-30cc17492e714c11.exe)
-error: test failed, to rerun pass `-p tok-models --lib`
