@@ -423,6 +423,78 @@ impl Tokenizer {
         self.model_max_length
     }
 
+    /// 角色表与基础词表的一致性体检（P2）。
+    ///
+    /// 这些情形 HF 也能跑通，但产物语义会与「纯文本语料训练」或用户预期悄悄不一致，
+    /// 所以只回警告文本，不返回错误、不修改任何状态：
+    ///
+    /// 1. 角色 token 只存在于**基础词表**（未登记到后加视图）：本质是训练器把它当普通
+    ///    子词产出了，`special_tokens_mask` / `skip_special_tokens` 会判错；
+    /// 2. 角色 token 完全不在词表：落盘后 `added_tokens_decoder` 里查不到，HF 侧
+    ///    `convert_tokens_to_ids` 会返回 unk；
+    /// 3. 模型节声明的 `unk_token` 与角色表 `unk` 不一致：OOV 落点与角色语义从此分叉；
+    /// 4. 后处理模板引用的 cls/sep 与角色表不同：`encode_pair(add_special_tokens=true)`
+    ///    插入的并不是被声明为 cls/sep 的那个 token；
+    /// 5. 角色 token 是**普通字面串**（没有 `<...>` / `[...]` 之类包裹）：后加 token
+    ///    匹配优先于模型切分，语料里同样的字面串从此不再走子词。
+    pub fn audit_roles(&self) -> Vec<String> {
+        let mut warns = Vec::new();
+        let vocab = self.model.get_vocab();
+        for tok in self.roles.all() {
+            match (vocab.token_to_id(&tok), vocab.added().token_to_id(&tok)) {
+                (Some(id), None) => warns.push(format!(
+                    "角色 token `{tok}`（id={id}）只存在于基础词表、未登记为后加 token：\
+                     special_tokens_mask 会把它当普通 token（HF 侧同样情形要求该 id 同时出现在 added_tokens）"
+                )),
+                (None, _) => warns.push(format!(
+                    "角色 token `{tok}` 不在词表中：落盘后 add_special_tokens 无法绑定该 id，\
+                     HF 侧 convert_tokens_to_ids 会返回 unk"
+                )),
+                (Some(_), Some(_)) => {}
+            }
+            if looks_like_plain_text(&tok) {
+                warns.push(format!(
+                    "角色 token `{tok}` 是普通字面串（无 `<>` / `[]` 包裹）：后加 token 匹配\
+                     优先于模型切分，语料中同样的字面串将整体成为一个 token，不再拆子词"
+                ));
+            }
+        }
+
+        if let Some(declared) = self.roles.unk_token.as_deref() {
+            if let Ok(json) = self.model.to_hf_json() {
+                if let Some(model_unk) = json.get("unk_token").and_then(|v| v.as_str()) {
+                    if model_unk != declared {
+                        warns.push(format!(
+                            "模型节 unk_token 为 `{model_unk}`，但角色表声明 unk 为 `{declared}`：\
+                             OOV 会落到 `{model_unk}`，而 tokenizer_config.json 写的是 `{declared}`"
+                        ));
+                    }
+                }
+            }
+        }
+
+        // 后处理模板有两种写法（Bert/Roberta 显式两元组、TemplateProcessing 模板表），
+        // 统一用 `required_specials()` 取「实际会插入的字面值」再比对角色声明。
+        if !self.post_processor.is_identity() {
+            let used = self.post_processor.required_specials();
+            for (slot, declared) in [
+                ("cls", self.roles.cls_token.as_deref()),
+                ("sep", self.roles.sep_token.as_deref()),
+            ] {
+                let Some(declared) = declared else { continue };
+                if used.iter().any(|u| u == declared) {
+                    continue;
+                }
+                warns.push(format!(
+                    "后处理模板不会插入角色表声明的 {slot} token `{declared}`（实际插入：{}）：\
+                     encode_pair(add_special_tokens=true) 的首尾标记与角色声明不一致",
+                    used.join(", ")
+                ));
+            }
+        }
+        warns
+    }
+
     // ---------------------------------------------------------------- 登记
 
     /// 登记后加 token：分配 id（追加在词表末尾，不重编号既有 ID）并写入后加视图。
@@ -969,6 +1041,20 @@ impl Tokenizer {
     pub fn vocab_map(&self) -> BTreeMap<String, u32> {
         self.model.get_vocab().to_id_map()
     }
+}
+
+/// 角色 token 是否看起来像正文（无 `<>` / `[]` / `▁` 包裹）。
+///
+/// 用于 P2 冲突告警：这种 token 一旦登记为后加 token，就会在正常文本里整体命中，
+/// 语料中同样的字面串不再走子词切分。
+fn looks_like_plain_text(tok: &str) -> bool {
+    let t = tok.trim();
+    if t.is_empty() {
+        return false;
+    }
+    let wrapped =
+        t.starts_with('<') || t.starts_with('[') || t.starts_with('▁') || t.starts_with('#');
+    !wrapped && t.chars().any(|c| c.is_alphanumeric())
 }
 
 /// 重建后处理器（保留模板表，避免训练后丢失特殊 token 绑定）。

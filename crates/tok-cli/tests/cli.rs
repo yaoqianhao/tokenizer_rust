@@ -1535,3 +1535,74 @@ fn train_role_rejects_invalid_specs() {
     let empty = run(base(&sb, &["--role", "cls="]));
     assert_fails(&empty, "空 token 应报错");
 }
+
+/// P2：角色 token 与正文/基础词表重叠时，训练仍成功，但必须向 stderr 告警。
+#[test]
+fn train_warns_when_role_token_looks_like_plain_text() {
+    let sb = Sandbox::new("role-audit");
+    let corpus = sb.write("role-audit-corpus.txt", CORPUS);
+    let plain = sb.path("plain-role");
+    let r = run([
+        "train",
+        "--corpus",
+        corpus.to_str().unwrap(),
+        "--out",
+        plain.to_str().unwrap(),
+        "--model",
+        "wordpiece",
+        "--pre-tokenizer",
+        "bert",
+        "--vocab-size",
+        "300",
+        "--special",
+        "[UNK]",
+        "--special",
+        "[PAD]",
+        "--role",
+        "cls=hello",
+        "--role",
+        "sep=world",
+    ]);
+    assert!(r.status.success(), "告警不应阻断落盘：{}", stderr_of(&r));
+    let err = stderr_of(&r);
+    assert!(
+        err.contains("警告") && err.contains("hello") && err.contains("不再拆子词"),
+        "缺少普通字面串告警：{err}"
+    );
+    // 产物照常落盘且仍承载声明的角色
+    let cfg = std::fs::read_to_string(plain.join("tokenizer_config.json")).expect("读配置");
+    assert!(
+        cfg.contains("hello"),
+        "角色应写入 tokenizer_config.json：{cfg}"
+    );
+
+    // 包裹形态的角色（<|cls|>）不该触发告警
+    let clean = sb.path("clean-role");
+    let r2 = run([
+        "train",
+        "--corpus",
+        corpus.to_str().unwrap(),
+        "--out",
+        clean.to_str().unwrap(),
+        "--model",
+        "wordpiece",
+        "--pre-tokenizer",
+        "bert",
+        "--vocab-size",
+        "300",
+        "--special",
+        "[UNK]",
+        "--special",
+        "[PAD]",
+        "--role",
+        "cls=<|cls|>",
+        "--role",
+        "sep=<|sep|>",
+    ]);
+    assert!(r2.status.success(), "训练失败：{}", stderr_of(&r2));
+    assert!(
+        !stderr_of(&r2).contains("警告"),
+        "干净角色表不应告警：{}",
+        stderr_of(&r2)
+    );
+}

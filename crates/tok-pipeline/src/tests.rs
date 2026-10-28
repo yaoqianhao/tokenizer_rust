@@ -719,3 +719,80 @@ fn load_pretrained_restores_roles_from_config_files() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// P2：规整的角色表必须零告警——体检不能对正常产物"喊狼来了"。
+#[test]
+fn audit_roles_clean_config_is_silent() {
+    let tk = Tokenizer::from_config(&bert_config(true)).unwrap();
+    assert!(
+        tk.audit_roles().is_empty(),
+        "标准 bert 角色不应产生告警：{:?}",
+        tk.audit_roles()
+    );
+}
+
+/// P2：角色 token 是普通字面串时，必须告警"后加 token 匹配优先于模型切分"。
+#[test]
+fn audit_roles_warns_on_plain_text_role() {
+    let mut tk = Tokenizer::from_config(&bert_config(true)).unwrap();
+    let roles = TokenRoles {
+        cls_token: Some("hello".to_string()),
+        ..tk.roles().clone()
+    };
+    tk.set_roles(roles).unwrap();
+
+    let warns = tk.audit_roles();
+    let hit = warns
+        .iter()
+        .find(|w| w.contains("hello") && w.contains("普通字面串"))
+        .unwrap_or_else(|| panic!("缺少普通字面串告警：{warns:?}"));
+    assert!(hit.contains("不再拆子词"), "告警应说明切分行为变化：{hit}");
+    // 其余角色仍是包裹形态，不应连带告警
+    assert!(
+        !warns.iter().any(|w| w.contains("[UNK]")),
+        "包裹形态的 [UNK] 不该告警：{warns:?}"
+    );
+}
+
+/// P2：模型节 unk 与角色表 unk 分叉时必须告警（OOV 落点会与配置不符）。
+#[test]
+fn audit_roles_warns_on_unk_mismatch() {
+    let mut tk = Tokenizer::from_config(&bert_config(true)).unwrap();
+    let roles = TokenRoles {
+        unk_token: Some("<|unk|>".to_string()),
+        ..tk.roles().clone()
+    };
+    tk.set_roles(roles).unwrap();
+
+    let warns = tk.audit_roles();
+    let hit = warns
+        .iter()
+        .find(|w| w.contains("unk_token") && w.contains("[UNK]") && w.contains("<|unk|>"))
+        .unwrap_or_else(|| panic!("缺少 unk 不一致告警：{warns:?}"));
+    assert!(hit.contains("OOV"), "告警应点明 OOV 落点：{hit}");
+}
+
+/// P2：后处理模板引用的 cls/sep 与角色表不同时必须告警。
+#[test]
+fn audit_roles_warns_on_post_processor_mismatch() {
+    let mut tk = Tokenizer::from_config(&bert_config(true)).unwrap();
+    let roles = TokenRoles {
+        cls_token: Some("<|cls|>".to_string()),
+        sep_token: Some("<|sep|>".to_string()),
+        ..tk.roles().clone()
+    };
+    tk.set_roles(roles).unwrap();
+
+    let warns = tk.audit_roles();
+    for slot in ["cls", "sep"] {
+        assert!(
+            warns
+                .iter()
+                .any(|w| w.contains(slot) && w.contains("后处理模板")),
+            "缺少 {slot} 模板不一致告警：{warns:?}"
+        );
+    }
+    // 模板实际插入的仍是 [CLS]/[SEP]，这正是告警指向的事实
+    let enc = tk.encode_pair("hello", "world", true).unwrap();
+    assert!(enc.ids.contains(&2) && enc.ids.contains(&3));
+}

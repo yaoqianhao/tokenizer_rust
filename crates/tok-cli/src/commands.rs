@@ -272,6 +272,11 @@ pub fn run_train(args: TrainArgs) -> Result<()> {
         &specials,
     )?;
     apply_io_params(&mut tokenizer, trunc, pad);
+    // P2：角色表与基础词表的一致性体检。只告警不阻断——这些情形产物仍能加载，
+    // 但语义会与预期悄悄分叉，必须在落盘前让用户看见。
+    for w in tokenizer.audit_roles() {
+        eprintln!("警告: {w}");
+    }
     let identity: Option<(&str, &str)> = match args.hf_model_type.as_str() {
         "none" => None,
         "auto" => tokenizer.hf_identity(),
