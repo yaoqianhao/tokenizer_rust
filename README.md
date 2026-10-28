@@ -85,10 +85,12 @@ tok compare --left artifacts/tok --right artifacts/tok_new --only-diff --strict
 ### 对齐基准（HF parity）
 
 `crates/tok-pipeline/tests/hf_parity_golden.rs` 以 **HuggingFace `tokenizers`**
-的输出为外部基准，锁定两套典型配置（byte-level BPE / Metaspace Unigram）在
-`ids` / `tokens` / `offsets` 三个字段上的逐项结果，并额外守住三条性质：
-批量编码与逐条编码逐字段一致、偏移起点在长文本上单调不减、多字节字符被拆成
-多片时共享同一字符区间。基准数据为 `tests/data/*.json`，均为最小可复现词表。
+的输出为外部基准，锁定三套典型配置（byte-level BPE / Metaspace Unigram /
+WordPiece+Bert）在 `ids` / `tokens` / `offsets` 三个字段上的逐项结果。
+WordPiece 一组专锁 **UNK 语义**：未登录词的粒度是"预分词片段"，一个片段整体
+退化为单个 `[UNK]`（`"😀🎉🧠"`、`"a😀b"`、`"中文字"` 均须为 1 个 UNK）。
+基准还守住三条性质：批量编码与逐条编码逐字段一致、偏移起点在长文本上单调不减、
+多字节字符被拆成多片时共享同一字符区间。基准数据为 `tests/data/*.json`，均为最小可复现词表。
 
 ## 架构
 

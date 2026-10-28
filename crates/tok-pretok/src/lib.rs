@@ -9,6 +9,7 @@ use tok_core::{
     layer, NormalizedString, PatternSpec, PreTokenizer, Result, TokenizerError,
     GPT2_BYTE_LEVEL_PATTERN,
 };
+use unicode_general_category::{get_general_category, GeneralCategory};
 // 重新导出核心层的分隔符行为，L2 使用者无需直接依赖 `tok-core`。
 pub use tok_core::SplitDelimiterBehavior;
 
@@ -368,8 +369,26 @@ impl PreTokenizerWrapper {
     }
 }
 
+/// 标点判定：与 HF `unicode_categories` 的 `P*` 类别严格对齐。
+///
+/// 只认 Unicode 标点类别（Pc / Pd / Pe / Pf / Pi / Po / Ps），
+/// emoji（So）、数学符号（Sm）、货币符号（Sc）等**不算**标点——
+/// 否则 `"😀🎉🧠"` 会被逐字符拆成独立 piece，WordPiece 也就逐字符吐 `[UNK]`，
+/// 而 HF 会把它当成一个 word、整词退化为单个 `[UNK]`。
 fn is_punctuation(c: char) -> bool {
-    c.is_ascii_punctuation() || (!c.is_alphanumeric() && !c.is_whitespace() && !c.is_control())
+    if c.is_ascii() {
+        return c.is_ascii_punctuation();
+    }
+    matches!(
+        get_general_category(c),
+        GeneralCategory::ConnectorPunctuation
+            | GeneralCategory::DashPunctuation
+            | GeneralCategory::ClosePunctuation
+            | GeneralCategory::FinalPunctuation
+            | GeneralCategory::InitialPunctuation
+            | GeneralCategory::OpenPunctuation
+            | GeneralCategory::OtherPunctuation
+    )
 }
 
 impl PreTokenizer for PreTokenizerWrapper {

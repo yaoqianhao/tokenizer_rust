@@ -132,6 +132,63 @@ const METASPACE_UNIGRAM: &[Case] = &[
     ),
 ];
 
+/// WordPiece + BertPreTokenizer（同 `tests/data/wordpiece_bert.json`）。
+///
+/// 这组基准锁定 **UNK 语义**：WordPiece 对未登录词的粒度是"预分词片段"，
+/// 一个片段整体退化为**单个** `[UNK]`，不会按字符/字节散开。文中
+/// `"😀🎉🧠 mixed"`、`"a😀b"`、`"中文字"` 是最容易被实现细节写坏的边界：
+/// 只要 BertPreTokenizer 的标点判定把 emoji / 汉字误判成标点，预分词就会
+/// 在词内切开片段，UNK 数量与偏移随之裂开，与 HF 产生可见偏差。
+const WORD_PIECE_BERT: &[Case] = &[
+    (
+        "hello world",
+        &[4, 5],
+        &["hello", "world"],
+        &[(0, 5), (6, 11)],
+    ),
+    ("hellozzzz", &[1], &["[UNK]"], &[(0, 9)]),
+    ("zzzz yyxx", &[1, 1], &["[UNK]", "[UNK]"], &[(0, 4), (5, 9)]),
+    (
+        "hello zzzz world",
+        &[4, 1, 5],
+        &["hello", "[UNK]", "world"],
+        &[(0, 5), (6, 10), (11, 16)],
+    ),
+    (
+        "😀🎉🧠 mixed",
+        &[1, 1],
+        &["[UNK]", "[UNK]"],
+        &[(0, 3), (4, 9)],
+    ),
+    (
+        "abc def ghi",
+        &[1, 1, 1],
+        &["[UNK]", "[UNK]", "[UNK]"],
+        &[(0, 3), (4, 7), (8, 11)],
+    ),
+    ("hello!", &[4, 11], &["hello", "!"], &[(0, 5), (5, 6)]),
+    ("中文字", &[1], &["[UNK]"], &[(0, 3)]),
+    ("a😀b", &[1], &["[UNK]"], &[(0, 3)]),
+    (
+        "$100 ¥20 ±3",
+        &[1, 1, 1, 1],
+        &["[UNK]", "[UNK]", "[UNK]", "[UNK]"],
+        &[(0, 1), (1, 4), (5, 8), (9, 11)],
+    ),
+    (
+        "“引号”…—",
+        &[1, 1, 1, 1, 1],
+        &["[UNK]", "[UNK]", "[UNK]", "[UNK]", "[UNK]"],
+        &[(0, 1), (1, 3), (3, 4), (4, 5), (5, 6)],
+    ),
+    (
+        "Hello uns world",
+        &[4, 13, 5],
+        &["hello", "uns", "world"],
+        &[(0, 5), (6, 9), (10, 15)],
+    ),
+];
+
 fn check(file: &str, cases: &[Case]) {
     let tk: Tokenizer = load_tokenizer_json(&data_path(file)).expect("加载 tokenizer.json");
     for (text, ids, tokens, offsets) in cases {
@@ -153,12 +210,51 @@ fn metaspace_unigram_matches_hf_golden() {
     check("metaspace_unigram.json", METASPACE_UNIGRAM);
 }
 
+#[test]
+fn wordpiece_bert_matches_hf_golden() {
+    check("wordpiece_bert.json", WORD_PIECE_BERT);
+}
+
+/// UNK 语义的性质断言：连续 OOV 片段只产生一个 `[UNK]`，不按字符散开。
+///
+/// 与上面的表驱动基准互补——表锁死具体值，这里锁死"数量关系"这一语义本身，
+/// 即使将来换掉词表数据，该性质也不应失效。
+#[test]
+fn wordpiece_collapses_oov_span_into_single_unk() {
+    let tk: Tokenizer = load_tokenizer_json(&data_path("wordpiece_bert.json")).expect("load");
+    for text in ["😀🎉🧠 mixed", "a😀b", "中文字", "hellozzzz"] {
+        let enc = tk.encode(text, false).expect("encode");
+        let unk_prefix: Vec<usize> = enc
+            .tokens
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.as_str() == "[UNK]")
+            .map(|(i, _)| i)
+            .collect();
+        // 连续多个 UNK 只允许来自"多个预分词片段"，绝不能来自同一个片段被切开：
+        // 因此每个 UNK 的偏移区间必须互不相同。
+        let mut ranges: Vec<(usize, usize)> = unk_prefix.iter().map(|&i| enc.offsets[i]).collect();
+        ranges.sort_unstable();
+        ranges.dedup();
+        assert_eq!(
+            ranges.len(),
+            unk_prefix.len(),
+            "{text:?} 的多个 [UNK] 落到了同一字符区间，说明预分词把单个片段切碎了"
+        );
+        assert!(
+            !unk_prefix.is_empty() || text.is_empty(),
+            "{text:?} 应至少包含一个 [UNK]"
+        );
+    }
+}
+
 /// 批量编码必须与逐条编码逐字段一致（rayon 并行不改变顺序与偏移）。
 #[test]
 fn encode_batch_matches_serial_for_both_models() {
     for (file, cases) in [
         ("byte_level_bpe.json", BYTE_LEVEL_BPE),
         ("metaspace_unigram.json", METASPACE_UNIGRAM),
+        ("wordpiece_bert.json", WORD_PIECE_BERT),
     ] {
         let tk: Tokenizer = load_tokenizer_json(&data_path(file)).expect("加载 tokenizer.json");
         let texts: Vec<String> = cases.iter().map(|c| c.0.to_string()).collect();
