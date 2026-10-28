@@ -423,6 +423,10 @@ impl NormalizedString {
         let mut out = String::new();
         let mut alignments: Vec<Alignment> = Vec::new();
         let mut splits: Vec<(usize, usize)> = Vec::new();
+        // piece 在原文上单调递增 → 对齐表用游标推进，避免每个 piece 全表扫描（旧实现 O(pieces×n)）。
+        let src_alignments = &self.alignments;
+        let mut ac = 0usize;
+        let hits_sorted = hits.windows(2).all(|w| w[0].0 <= w[1].0);
 
         for (s, e) in segments {
             if e <= s || e > self.normalized.len() {
@@ -430,12 +434,22 @@ impl NormalizedString {
             }
             let text = &self.normalized[s..e];
             // 只取落在本 segment 内的命中区间；与未命中的空隙共同覆盖整个 segment，避免静默丢字符
-            let mut local: Vec<(usize, usize)> = hits
-                .iter()
-                .copied()
-                .filter(|(hs, he)| *hs >= s && *he <= e && he > hs)
-                .map(|(hs, he)| (hs - s, he - s))
-                .collect();
+            let mut local: Vec<(usize, usize)> = if hits_sorted {
+                let from = hits.partition_point(|(_, he)| *he <= s);
+                hits[from..]
+                    .iter()
+                    .copied()
+                    .take_while(|(hs, _)| *hs < e)
+                    .filter(|(hs, he)| *hs >= s && *he <= e && he > hs)
+                    .map(|(hs, he)| (hs - s, he - s))
+                    .collect()
+            } else {
+                hits.iter()
+                    .copied()
+                    .filter(|(hs, he)| *hs >= s && *he <= e && he > hs)
+                    .map(|(hs, he)| (hs - s, he - s))
+                    .collect()
+            };
             local.sort_unstable();
             let mut pieces: Vec<(usize, usize)> = Vec::new();
             let mut cursor = 0usize;
@@ -457,11 +471,15 @@ impl NormalizedString {
                 let abs_end = s + pe;
                 let mut o_start: Option<usize> = None;
                 let mut o_end = 0usize;
-                for a in &self.alignments {
-                    if a.n_end > abs_start && a.n_start < abs_end {
-                        o_start = Some(o_start.map_or(a.o_start, |v: usize| v.min(a.o_start)));
-                        o_end = o_end.max(a.o_end);
-                    }
+                while ac < src_alignments.len() && src_alignments[ac].n_end <= abs_start {
+                    ac += 1;
+                }
+                let mut k = ac;
+                while k < src_alignments.len() && src_alignments[k].n_start < abs_end {
+                    let a = &src_alignments[k];
+                    o_start = Some(o_start.map_or(a.o_start, |v: usize| v.min(a.o_start)));
+                    o_end = o_end.max(a.o_end);
+                    k += 1;
                 }
                 let piece_start = out.len();
                 for (byte_cursor, b) in (o_start.unwrap_or(abs_start)..)
@@ -491,10 +509,28 @@ impl NormalizedString {
     pub fn split_by_matches(&mut self, matches: Vec<(usize, usize)>) {
         let segments = self.current_segments();
         let mut out = Vec::new();
-        for (s, e) in segments {
-            for (a, b) in matches.iter().copied() {
-                if a >= s && b <= e && b > a {
-                    out.push((a, b));
+        let sorted = matches.windows(2).all(|w| w[0].0 <= w[1].0);
+        if sorted {
+            let mut from = 0usize;
+            for (s, e) in segments {
+                while from < matches.len() && matches[from].1 <= s {
+                    from += 1;
+                }
+                let mut i = from;
+                while i < matches.len() && matches[i].0 < e {
+                    let (a, b) = matches[i];
+                    if a >= s && b <= e && b > a {
+                        out.push((a, b));
+                    }
+                    i += 1;
+                }
+            }
+        } else {
+            for (s, e) in segments {
+                for (a, b) in matches.iter().copied() {
+                    if a >= s && b <= e && b > a {
+                        out.push((a, b));
+                    }
                 }
             }
         }
@@ -509,13 +545,33 @@ impl NormalizedString {
     ) {
         let segments = self.current_segments();
         let mut out = Vec::new();
+        // 段与分隔符均单调递增 → 双指针；旧实现按「段×分隔符」双重遍历，
+        // 二次切分（如 Bert: 先空白再标点）时会退化为 O(n²)。
+        let sorted = delims.windows(2).all(|w| w[0].0 <= w[1].0);
+        let mut from = 0usize;
         for (s, e) in segments {
-            let ds: Vec<(usize, usize)> = delims
-                .iter()
-                .copied()
-                .filter(|(a, b)| *a >= s && *b <= e && b > a)
-                .collect();
-            out.extend(apply_split_one(&ds, s, e, behavior));
+            if sorted {
+                while from < delims.len() && delims[from].1 <= s {
+                    from += 1;
+                }
+                let mut ds: Vec<(usize, usize)> = Vec::new();
+                let mut i = from;
+                while i < delims.len() && delims[i].0 < e {
+                    let (a, b) = delims[i];
+                    if a >= s && b <= e && b > a {
+                        ds.push((a, b));
+                    }
+                    i += 1;
+                }
+                out.extend(apply_split_one(&ds, s, e, behavior));
+            } else {
+                let ds: Vec<(usize, usize)> = delims
+                    .iter()
+                    .copied()
+                    .filter(|(a, b)| *a >= s && *b <= e && b > a)
+                    .collect();
+                out.extend(apply_split_one(&ds, s, e, behavior));
+            }
         }
         self.splits = Some(out);
     }
@@ -576,21 +632,75 @@ impl NormalizedString {
     }
 
     /// normalized 字节区间 → original 字节区间（取覆盖该区间的最小对齐跨度）。
+    ///
+    /// 单次调用走二分（对齐表按 `n_start`/`n_end` 单调递增），O(log n)；
+    /// 顺序/批量调用请改用带游标的 [`Self::convert_offsets_from`]，可摊还到 O(1)/次。
     pub fn convert_offsets(&self, range: (usize, usize)) -> Option<Offset> {
         let (start, end) = range;
         if start >= end {
             return None;
         }
+        let alignments = &self.alignments;
+        // 首个 n_end > start 的对齐片（即首个可能与区间相交的片）
+        let lo = alignments.partition_point(|a| a.n_end <= start);
+        if lo >= alignments.len() {
+            return None;
+        }
+        let f = alignments[lo];
+        if f.n_start >= end {
+            return None;
+        }
+        // 末个 n_start < end 的对齐片
+        let hi = alignments.partition_point(|a| a.n_start < end);
+        let l = alignments[hi - 1];
+        let s = f.o_start;
+        let e = l.o_end.max(s);
+        Some(Offset { start: s, end: e })
+    }
+
+    /// 带游标的 `convert_offsets`：`cursor` 可跨调用复用，区间**单调递增**的调用序列
+    /// 下整体开销摊还到 O(1)/次。
+    ///
+    /// 语义与 `convert_offsets` 完全一致：命中与 `range` 有交叠的首/末对齐片，
+    /// 返回其 `[o_start, o_end)` 最小覆盖跨度（跨空洞时按首尾合并，与旧行为相同）。
+    /// 游标若已越过本次区间（调用非单调），自动回退到起点重扫，结果不受影响。
+    pub fn convert_offsets_from(
+        &self,
+        range: (usize, usize),
+        cursor: &mut usize,
+    ) -> Option<Offset> {
+        let (start, end) = range;
+        if start >= end {
+            return None;
+        }
+        let alignments = &self.alignments;
+        let n = alignments.len();
+        // 命中与 range 有**交叠**的首/末对齐片，包含起点早于 range.start 但跨进区间的片
+        // （byte-level/metaspace 的前缀符号会与后续字符共享对齐片，语义与 HF 一致）
+        let mut i = (*cursor).min(n);
+        if i >= n || alignments[i].n_start >= end {
+            // 游标越过本次区间（调用非单调）→ 二分定位起点重扫，避免回到 0 造成 O(n) 扫描
+            i = alignments.partition_point(|a| a.n_end <= start);
+        }
+        // 回退跨越 range.start 的片（单调序列下必为紧邻的前若干片，摊还 O(1)）
+        while i > 0 && alignments[i - 1].n_end > start {
+            i -= 1;
+        }
+        while i < n && alignments[i].n_end <= start {
+            i += 1;
+        }
         let mut first: Option<Alignment> = None;
         let mut last: Option<Alignment> = None;
-        for a in &self.alignments {
-            if a.n_end > start && a.n_start < end {
+        while i < n && alignments[i].n_start < end {
+            if alignments[i].n_end > start {
                 if first.is_none() {
-                    first = Some(*a);
+                    first = Some(alignments[i]);
                 }
-                last = Some(*a);
+                last = Some(alignments[i]);
             }
+            i += 1;
         }
+        *cursor = i;
         let f = first?;
         let l = last?;
         let s = f.o_start;
@@ -601,12 +711,14 @@ impl NormalizedString {
     /// 产出预分词单元（含 original 偏移）。
     pub fn pretokens(&self) -> Vec<PreToken> {
         let segs = self.current_segments();
+        // 段起点单调递增 → 游标跨段复用，整串 O(n)
+        let mut cursor = 0usize;
         segs.into_iter()
             .enumerate()
             .filter(|(_, (a, b))| b > a)
             .map(|(i, (a, b))| {
                 let value = self.normalized[a..b].to_string();
-                let offsets = match self.convert_offsets((a, b)) {
+                let offsets = match self.convert_offsets_from((a, b), &mut cursor) {
                     Some(o) => (o.start, o.end),
                     None => (a, b),
                 };

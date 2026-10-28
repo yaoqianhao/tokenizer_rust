@@ -15,4 +15,5 @@ tok-decoders = { workspace = true }
 tok-trainers = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+ahash = { workspace = true }
 rayon = { workspace = true }

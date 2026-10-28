@@ -5,6 +5,8 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use ahash::AHashSet;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -105,6 +107,9 @@ pub struct Tokenizer {
     truncation: Option<TruncationParams>,
     padding: Option<PaddingParams>,
     model_max_length: usize,
+    /// 特殊 token 的 id 集合（`encode` 热路径用 O(1) 判定，避免逐 token 遍历 added 表）。
+    /// 由 `register_added` / `train` 后经 `rebuild_special_set` 刷新。
+    special_set: AHashSet<u32>,
 }
 
 impl std::fmt::Debug for Tokenizer {
@@ -164,6 +169,7 @@ impl Tokenizer {
             truncation: cfg.truncation.clone(),
             padding: cfg.padding.clone(),
             model_max_length: cfg.model_max_length,
+            special_set: AHashSet::new(),
         };
 
         // 1) 登记配置里声明的 added token
@@ -328,7 +334,22 @@ impl Tokenizer {
             count += 1;
         }
         self.added_tokens = added;
+        self.rebuild_special_set();
         Ok(count)
+    }
+
+    /// 重建特殊 token id 集合（`register_added` / `train` 之后调用）。
+    fn rebuild_special_set(&mut self) {
+        let set: AHashSet<u32> = self
+            .model
+            .get_vocab()
+            .added()
+            .tokens()
+            .iter()
+            .filter(|(t, _)| t.special)
+            .map(|(_, id)| *id)
+            .collect();
+        self.special_set = set;
     }
 
     /// 特殊 token 的 id 列表（`skip_special_tokens` 语义）。
@@ -363,17 +384,18 @@ impl Tokenizer {
         self.truncate_final(enc, add_special_tokens)
     }
 
-    /// 批量编码（串行；`rayon` 并行留待 CLI 侧按批切分）。
+    /// 批量编码（`rayon` 并行，结果顺序与输入严格对应）。
     pub fn encode_batch(
         &self,
         texts: &[String],
         add_special_tokens: bool,
     ) -> Result<Vec<Encoding>> {
-        let mut out = Vec::with_capacity(texts.len());
-        for t in texts {
-            out.push(self.encode(t, add_special_tokens)?);
-        }
-        Ok(out)
+        // 每条文本的编码相互独立、且 `encode` 只读 `&self`，可直接并行。
+        // 顺序由 rayon 的 indexed collect 保证，与串行结果逐条对应。
+        texts
+            .par_iter()
+            .map(|t| self.encode(t, add_special_tokens))
+            .collect()
     }
 
     /// 只要子词字面值（调试/校验用）。
@@ -442,24 +464,31 @@ impl Tokenizer {
         let units = self.model.get_vocab().added().split(ns.normalized());
         let mut enc = Encoding::default();
         let mut degraded = ns.is_degraded();
+        // 字符起点表：字节偏移 → 字符索引的换算从「每次从头数」变成「一次构建 + 二分」，
+        // 否则每个子词都要 `chars().count()` 一遍原文，编码整体退化为 O(n²)。
+        let char_starts = char_index_table(text);
+        // 后加 token 切分单元与预分词片均按原文顺序递增 → 对齐表游标可跨单元复用。
+        // 注意：片级与子词级是两套互相交错的区间序列（子词级起点总会落在片级游标之后），
+        // 共用游标会不断触发回退重扫使 encode 退化为 O(n²)，因此各自独立。
+        let mut ns_cursor = 0usize;
+        let mut ns_subword_cursor = 0usize;
 
         for unit in units {
             match unit.id {
                 Some(id) => {
                     let off = ns
-                        .convert_offsets((unit.start, unit.end))
+                        .convert_offsets_from((unit.start, unit.end), &mut ns_cursor)
                         .map(|o| (o.start, o.end));
                     if off.is_none() {
                         degraded = true;
                     }
                     let (s, e) = off.unwrap_or((0, 0));
-                    let special = self
-                        .model
-                        .get_vocab()
-                        .added()
-                        .tokens()
-                        .iter()
-                        .any(|(t, i)| *i == id && t.special);
+                    // 与子词分支保持同一坐标系：对外 offsets 一律是**原文字符**区间
+                    let (s, e) = (
+                        byte_to_char_with(&char_starts, s),
+                        byte_to_char_with(&char_starts, e),
+                    );
+                    let special = self.special_set.contains(&id);
                     enc.ids.push(id);
                     enc.type_ids.push(0);
                     enc.tokens.push(unit.text.clone());
@@ -477,9 +506,11 @@ impl Tokenizer {
                     if let Some(p) = &self.pre_tokenizer {
                         p.pre_tokenize(&mut local)?;
                     }
+                    // 片偏移同样递增 → 单元内游标复用
+                    let mut local_cursor = 0usize;
                     for pt in local.pretokens() {
                         let abs = (unit.start + pt.offsets.0, unit.start + pt.offsets.1);
-                        let outer = match ns.convert_offsets(abs) {
+                        let outer = match ns.convert_offsets_from(abs, &mut ns_cursor) {
                             Some(o) => (o.start, o.end),
                             None => {
                                 degraded = true;
@@ -489,13 +520,7 @@ impl Tokenizer {
                         // ---- S3 子词切分
                         let subwords = self.model.tokenize(&pt.value)?;
                         for sw in subwords {
-                            let is_special = self
-                                .model
-                                .get_vocab()
-                                .added()
-                                .tokens()
-                                .iter()
-                                .any(|(t, i)| *i == sw.id && t.special);
+                            let is_special = self.special_set.contains(&sw.id);
                             enc.ids.push(sw.id);
                             enc.type_ids.push(0);
                             enc.tokens.push(sw.value.clone());
@@ -509,10 +534,10 @@ impl Tokenizer {
                             // wordpiece/unigram 亦然），因此直接相加，不做字节→字符换算。
                             let rel =
                                 (pt.n_offsets.0 + sw.offsets.0, pt.n_offsets.0 + sw.offsets.1);
-                            let (s, e) = match local.convert_offsets(rel) {
+                            let (s, e) = match local.convert_offsets_from(rel, &mut local_cursor) {
                                 Some(o) => {
                                     let abs = (unit.start + o.start, unit.start + o.end);
-                                    match ns.convert_offsets(abs) {
+                                    match ns.convert_offsets_from(abs, &mut ns_subword_cursor) {
                                         Some(o2) => (o2.start, o2.end),
                                         None => {
                                             degraded = true;
@@ -526,7 +551,10 @@ impl Tokenizer {
                             // 对外语义与 HF 对齐：offsets 输出**原文字符**区间（内部全程为字节）。
                             // 注意：特殊 token 也保留真实区间（HF 的 offsets 不因 special 置零，
                             // 只有 special_tokens_mask 标 1），因此这里不再对 is_special 特判。
-                            let (s, e) = (byte_to_char_index(text, s), byte_to_char_index(text, e));
+                            let (s, e) = (
+                                byte_to_char_with(&char_starts, s),
+                                byte_to_char_with(&char_starts, e),
+                            );
                             enc.offsets.push((s, e));
                             enc.attention_mask.push(1);
                             enc.special_tokens_mask.push(if is_special { 1 } else { 0 });
@@ -933,14 +961,16 @@ pub fn specials(tokens: &[&str]) -> Vec<AddedToken> {
     tokens.iter().map(|s| AddedToken::new(*s, true)).collect()
 }
 
-/// 字节偏移 → 字符索引（非字符边界时回退到最近的边界，容错）。
-/// 各 Model 输出的 offsets 以输入串的**字节**为单位，而 NormalizedString 的
-/// 对齐表以**字符**为单位，此处负责单位换算。
-fn byte_to_char_index(s: &str, byte: usize) -> usize {
-    let byte = byte.min(s.len());
-    let mut idx = byte;
-    while idx > 0 && !s.is_char_boundary(idx) {
-        idx -= 1;
-    }
-    s[..idx].chars().count()
+/// 字符起点表：每个字符的起始**字节**偏移（升序）。
+/// 各 Model 输出的 offsets 以输入串的**字节**为单位，对外则要求**字符**索引；
+/// 一次构建此表可让每次换算走二分，避免逐 token 重数字符串。
+fn char_index_table(s: &str) -> Vec<usize> {
+    s.char_indices().map(|(i, _)| i).collect()
+}
+
+/// 字节偏移 → 字符索引（非字符边界时向下取到最近的边界，容错）。
+fn byte_to_char_with(char_starts: &[usize], byte: usize) -> usize {
+    // 统计起点严格小于 byte 的字符数：边界处得到该字符的序号，
+    // 非边界处自然向下取整，与旧的 `s[..idx].chars().count()` 等价。
+    char_starts.partition_point(|&start| start < byte)
 }

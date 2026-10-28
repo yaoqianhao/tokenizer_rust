@@ -461,6 +461,7 @@ dependencies = [
 name = "tok-pipeline"
 version = "0.1.0"
 dependencies = [
+ "ahash",
  "rayon",
  "serde",
  "serde_json",
