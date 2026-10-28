@@ -235,12 +235,17 @@ impl PreTokenizerWrapper {
     fn run_one(&self, ns: &mut NormalizedString) -> Result<()> {
         match self {
             PreTokenizerWrapper::Whitespace => {
-                ns.split_on_pred(|c| c.is_whitespace(), SplitDelimiterBehavior::Removed);
+                // HF `Whitespace`：等价正则 `\w+|[^\w\s]+`——连续 word 字符成一段、
+                // 连续「非空白且非 word」的符号成一段，空白全部**丢弃**（不产出 piece）。
+                // 关键差别：这里会**切开标点**，"world!" → ["world", "!"]。
+                let spans = word_or_symbol_spans(ns.normalized());
+                ns.split_by_matches(spans);
                 Ok(())
             }
             PreTokenizerWrapper::WhitespaceSplit => {
-                // HF `WhitespaceSplit`：按空白切分且**丢弃**空白段（不产出 piece），
-                // 与 `Whitespace` 的差别仅在连续空白/首尾空白的处理细节上。
+                // HF `WhitespaceSplit`：仅按空白切分且**丢弃**空白段（不产出 piece），
+                // **不切标点**——"world!" 仍是单个 piece。这是与 `Whitespace` 的语义差别，
+                // 两者不能互相替代：训练侧产物按哪种配置生成，推理侧必须用同一种。
                 ns.split_on_pred(|c| c.is_whitespace(), SplitDelimiterBehavior::Removed);
                 Ok(())
             }
@@ -389,6 +394,70 @@ fn is_punctuation(c: char) -> bool {
             | GeneralCategory::OpenPunctuation
             | GeneralCategory::OtherPunctuation
     )
+}
+
+/// `\w` 判定：与 Rust `regex` 的 Unicode `\w` 保持一致。
+///
+/// `\w` = Alphabetic（L* + Nl + Other_Alphabetic）+ M* + Nd + Pc + Join_Control。
+/// 注意 `char::is_numeric()` 覆盖的是全部 N*（含 Nl / No），比 `\w` 更宽，
+/// 因此数字位必须单独用 `GeneralCategory::DecimalNumber` 判定。
+fn is_word_char(c: char) -> bool {
+    if c.is_ascii() {
+        return c.is_ascii_alphanumeric() || c == '_';
+    }
+    c.is_alphabetic()
+        || matches!(
+            get_general_category(c),
+            GeneralCategory::DecimalNumber
+                | GeneralCategory::NonspacingMark
+                | GeneralCategory::SpacingMark
+                | GeneralCategory::EnclosingMark
+                | GeneralCategory::ConnectorPunctuation
+        )
+        || c == '\u{200C}'
+        || c == '\u{200D}'
+}
+
+/// HF `Whitespace` 预分词的等价切分：正则 `\w+|[^\w\s]+` 的命中区间。
+///
+/// 连续 word 字符归为一段，连续「非空白且非 word」的符号归为一段，空白字符不入段。
+/// 返回 normalized 文本中的**字节**区间（`NormalizedString::split_by_matches` 约定）。
+fn word_or_symbol_spans(text: &str) -> Vec<(usize, usize)> {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Kind {
+        Word,
+        Symbol,
+    }
+
+    let mut out: Vec<(usize, usize)> = Vec::with_capacity(text.len() / 4 + 1);
+    let mut cur: Option<(Kind, usize, usize)> = None;
+    for (i, c) in text.char_indices() {
+        let end = i + c.len_utf8();
+        let kind = if c.is_whitespace() {
+            None
+        } else if is_word_char(c) {
+            Some(Kind::Word)
+        } else {
+            Some(Kind::Symbol)
+        };
+        match (kind, cur) {
+            (Some(k), Some((ck, s, _))) if ck == k => cur = Some((k, s, end)),
+            (Some(k), Some((_, s, e))) => {
+                out.push((s, e));
+                cur = Some((k, i, end));
+            }
+            (Some(k), None) => cur = Some((k, i, end)),
+            (None, Some((_, s, e))) => {
+                out.push((s, e));
+                cur = None;
+            }
+            (None, None) => {}
+        }
+    }
+    if let Some((_, s, e)) = cur {
+        out.push((s, e));
+    }
+    out
 }
 
 impl PreTokenizer for PreTokenizerWrapper {
@@ -599,6 +668,61 @@ mod tests {
         // HF `WhitespaceSplit` 丢弃空白，不产出空白 piece
         let v = pt(&PreTokenizerConfig::WhitespaceSplit, "a  b\tc");
         assert_eq!(v, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn whitespace_splits_punctuation_like_hf() {
+        // HF `Whitespace` 等价 `\w+|[^\w\s]+`：标点各自成段，空白丢弃
+        let v = pt(
+            &PreTokenizerConfig::Whitespace,
+            "hello, world! (Hi) 中文，标点。",
+        );
+        assert_eq!(
+            v,
+            vec!["hello", ",", "world", "!", "(", "Hi", ")", "中文", "，", "标点", "。"]
+        );
+    }
+
+    #[test]
+    fn whitespace_differs_from_whitespace_split_on_punctuation() {
+        // 两者的唯一语义差别：Whitespace 切标点，WhitespaceSplit 不切
+        assert_eq!(
+            pt(&PreTokenizerConfig::Whitespace, "world!"),
+            vec!["world", "!"]
+        );
+        assert_eq!(
+            pt(&PreTokenizerConfig::WhitespaceSplit, "world!"),
+            vec!["world!"]
+        );
+    }
+
+    #[test]
+    fn whitespace_keeps_word_chars_together() {
+        // `\w` 含 Pc / Nd / M*：下划线、数字串、组合记号都不断开；emoji（So）归符号段
+        let v = pt(&PreTokenizerConfig::Whitespace, "a_b 3.14 x\u{0301}y 😀😀");
+        assert_eq!(v, vec!["a_b", "3", ".", "14", "x\u{0301}y", "😀😀"]);
+    }
+
+    #[test]
+    fn whitespace_piece_offsets_point_to_original() {
+        // split_by_matches 必须保留 normalized → original 的对齐（多字节 + 丢弃空白）
+        let p = PreTokenizerWrapper::build(&PreTokenizerConfig::Whitespace).unwrap();
+        let mut ns = NormalizedString::new("hi, 世界!");
+        p.pre_tokenize(&mut ns).unwrap();
+        let got: Vec<(String, (usize, usize))> = ns
+            .pretokens()
+            .into_iter()
+            .map(|t| (t.value, t.offsets))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("hi".to_string(), (0, 2)),
+                (",".to_string(), (2, 3)),
+                ("世界".to_string(), (4, 10)),
+                ("!".to_string(), (10, 11)),
+            ]
+        );
     }
 
     #[test]
