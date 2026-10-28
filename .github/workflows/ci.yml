@@ -1,0 +1,167 @@
+name: CI
+
+# 触发策略：
+# * push 到主干与任意 PR 都跑，保证合入前参考实现的对齐基准不会静默漂移；
+# * 支持手动触发，便于排查本地无法复现的问题。
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+# 同一分支的新提交会取消旧运行，避免排队。
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # 让 backtrace 在测试失败时直接出现在日志里。
+  RUST_BACKTRACE: "1"
+
+jobs:
+  # ---------------------------------------------------------------- 静态检查
+  lint:
+    name: fmt + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Rust（含 rustfmt / clippy）
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      # --all-targets 必须带上：只查 lib/bin 会漏掉 tests/ 下的集成测试。
+      - name: cargo clippy -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  # ------------------------------------------------------------------ 单元+集成
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      # Windows 是主要开发环境，Linux 保证可移植性，两端都跑。
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: test-${{ matrix.os }}
+
+      - name: cargo test --workspace
+        run: cargo test --workspace --all-targets
+
+  # --------------------------------------------------- HF 对齐基准（独立门禁）
+  hf-parity-golden:
+    name: HF parity golden
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: golden
+
+      # 基准期望值全部来自 HF tokenizers 0.23.3 的离线录制结果，
+      # 因此 CI 不需要安装 Python 或 tokenizers，只需保证 tests/data/*.json 完整。
+      - name: 校验 golden 数据文件在位
+        run: |
+          set -euo pipefail
+          for f in byte_level_bpe.json metaspace_unigram.json wordpiece_bert.json; do
+            test -s "crates/tok-pipeline/tests/data/$f" || { echo "缺少基准数据: $f"; exit 1; }
+          done
+          ls -l crates/tok-pipeline/tests/data
+
+      # 单独跑一次并打开输出，回归时能直接看到是哪张表、哪条用例漂移。
+      - name: cargo test hf_parity_golden
+        run: cargo test -p tok-pipeline --test hf_parity_golden -- --nocapture
+
+      # tok-cli 的集成测试同样依赖这批复用产物，放在同一 job 里跑，
+      # 一旦 golden 漂移与 CLI 行为变化同时出现，日志集中在一处。
+      - name: cargo test tok-cli 集成测试
+        run: cargo test -p tok-cli --test cli -- --nocapture
+
+  # ------------------------------------------------------ CLI 端到端冒烟
+  cli-e2e:
+    name: tok-cli e2e (release)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: cli-e2e
+
+      - name: cargo build --release
+        run: cargo build --release -p tok-cli
+
+      # 真跑一遍用户路径：训练 → 体检 → 编码 → 解码往返 → 自洽比对。
+      - name: train → inspect → encode → decode → compare
+        run: |
+          set -euo pipefail
+          BIN=./target/release/tok-cli
+          ART="$(mktemp -d)"
+          trap 'rm -rf "$ART"' EXIT
+
+          printf '%s\n' \
+            'hello world this is a tokenizer corpus' \
+            '你好世界 这是一个测试语料' \
+            'emoji mixed with café naïve résumé' \
+            'the quick brown fox jumps over the lazy dog' \
+            '中文English混排test123数字456' \
+            'tokenization pipeline 负责把文本切成子词' > "$ART/corpus.txt"
+
+          echo '::group::train'
+          "$BIN" train --corpus "$ART/corpus.txt" --out "$ART/art" \
+            --vocab-size 300 --special '[UNK]' '[PAD]' --smoke
+          echo '::endgroup::'
+
+          echo '::group::inspect'
+          "$BIN" inspect --tokenizer "$ART/art" --head 5
+          echo '::endgroup::'
+
+          echo '::group::encode / decode'
+          JSON="$("$BIN" encode --tokenizer "$ART/art" --text 'hello world' --json)"
+          # 用 python3 解析而不是脆弱的正则：输出字段顺序随 serde 变化，
+          # 且 "type_ids" 里也含 "ids"，正则容易串味。
+          IDS="$(printf '%s' "$JSON" | python3 -c 'import json,sys; print(",".join(str(i) for i in json.load(sys.stdin)[0]["ids"]))')"
+          test -n "$IDS" || { echo "encode 未输出 ids: $JSON"; exit 1; }
+          TEXT="$("$BIN" decode --tokenizer "$ART/art" --ids "$IDS")"
+          test "$TEXT" = 'hello world' || { echo "解码往返不一致: [$TEXT]"; exit 1; }
+          echo "往返 OK: $TEXT"
+          echo '::endgroup::'
+
+          echo '::group::compare --strict'
+          "$BIN" compare --left "$ART/art" --right "$ART/art" --strict
+          echo '::endgroup::'
+
+      # 错误路径也应有稳定契约：非零退出 + stderr 报错。
+      - name: 错误路径（非零退出）
+        run: |
+          set -euo pipefail
+          BIN=./target/release/tok-cli
+          if "$BIN" encode --tokenizer /nonexistent 2>err.txt; then
+            echo "缺失参数应当失败"; exit 1
+          fi
+          grep -q '错误:' err.txt || { echo "stderr 未走统一错误通道"; cat err.txt; exit 1; }

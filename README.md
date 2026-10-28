@@ -12,6 +12,7 @@ AIGC:
 # tokenizer_rust
 
 [![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#许可证)
+[![CI](https://github.com/yaoqianhao/tokenizer_rust/actions/workflows/ci.yml/badge.svg)](https://github.com/yaoqianhao/tokenizer_rust/actions/workflows/ci.yml)
 
 纯 Rust 实现的分词器（tokenizer）流水线。按 HuggingFace `tokenizers` 的组件语义逐层实现，
 训练产物可直接被 `transformers` / `tokenizers` 的 fast tokenizer 加载。
@@ -27,7 +28,7 @@ AIGC:
 
 ```bash
 cargo build --release
-# 二进制：target/release/tok
+# 二进制：target/release/tok-cli（下文命令简写为 tok，可自行 alias）
 ```
 
 要求 Rust 1.75 及以上（见 `Cargo.toml` 的 `rust-version`）。
@@ -162,11 +163,38 @@ tok = AutoTokenizer.from_pretrained("artifacts/tok")
 
 ## 开发
 
+一键复现 CI 的三条命令：
+
 ```bash
-cargo fmt --all --check
-cargo clippy --workspace --all-targets
-cargo test --workspace
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --all-targets
 ```
+
+`--all-targets` 不能省：只查 lib/bin 会漏掉 `tests/` 下的集成测试与 golden 基准。
+
+按用途单跑：
+
+```bash
+cargo test -p tok-pipeline --test hf_parity_golden -- --nocapture   # HF 对齐基准
+cargo test -p tok-cli      --test cli               -- --nocapture   # CLI 端到端（真拉进程）
+```
+
+### CI
+
+`.github/workflows/ci.yml`，push 到主干与任意 PR 触发，四个 job：
+
+| job | 内容 | 平台 |
+| --- | --- | --- |
+| `lint` | `cargo fmt --check` + `clippy --all-targets -D warnings` | ubuntu |
+| `test` | `cargo test --workspace --all-targets` 全量 | ubuntu + windows |
+| `hf-parity-golden` | 独立门禁只跑 HF 对齐基准与 tok-cli 集成测试 | ubuntu |
+| `cli-e2e` | release 二进制跑 `train → inspect → encode → decode → compare --strict` | ubuntu |
+
+对齐基准的期望值全部来自 HF `tokenizers` 的离线录制结果（`crates/tok-pipeline/tests/data/*.json`），
+因此 CI 不装 Python、不装 `tokenizers`，也不联网——基准漂移只在实现真的改动时才会失败。
+`tok-cli` 不使用 mock：集成测试直接 spawn `CARGO_BIN_EXE_tok-cli`，用真实语料训练真实产物，
+报错文案只锁定"以 `错误:` 开头 + 非零退出码"这类与系统 locale 无关的契约。
 
 ## 许可证
 
