@@ -705,7 +705,16 @@ impl NormalizedString {
         let l = last?;
         let s = f.o_start;
         let e = l.o_end.max(s);
-        Some(Offset { start: s, end: e })
+        let out = Some(Offset { start: s, end: e });
+        // 游标复用最容易写错的地方：非单调 / 跨空洞回退时结果偏移。
+        // debug 构建下与二分的 `convert_offsets` 逐次对拍，release 不付代价。
+        debug_assert_eq!(
+            out,
+            self.convert_offsets(range),
+            "convert_offsets_from 与 convert_offsets 结果不一致：range={:?}",
+            range
+        );
+        out
     }
 
     /// 产出预分词单元（含 original 偏移）。

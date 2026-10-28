@@ -749,6 +749,9 @@ impl Trainer for UnigramTrainer {
             })
             .collect();
 
+        // 训练日志默认静默：库代码不应对调用方无条件写 stderr，
+        // 需要观察剪枝轮次时设置 TOK_VERBOSE=1。
+        let verbose = std::env::var_os("TOK_VERBOSE").is_some();
         let mut rounds = 0usize;
         loop {
             let mut expected: AHashMap<String, f64> = AHashMap::new();
@@ -769,6 +772,7 @@ impl Trainer for UnigramTrainer {
             } else {
                 target
             };
+            let before = pieces.len();
             pieces = Self::prune(pieces, &logp, &expected, &protected, target);
             // 剪枝后按剩余集合重估（缺失的给极低分，保证 EM 可继续）
             let mut total = 0.0f64;
@@ -786,14 +790,15 @@ impl Trainer for UnigramTrainer {
                 logp = next;
             }
             rounds += 1;
-            eprintln!(
-                "[unigram] 剪枝轮次 {}：词表 {} -> {}（目标 {}）",
-                rounds,
-                pieces.len() + (pieces.len() as f64 / self.shrinking_factor) as usize
-                    - pieces.len(),
-                pieces.len(),
-                budget
-            );
+            if verbose {
+                eprintln!(
+                    "[unigram] 剪枝轮次 {}：词表 {} -> {}（目标 {}）",
+                    rounds,
+                    before,
+                    pieces.len(),
+                    budget
+                );
+            }
             if rounds > 40 {
                 break;
             }
