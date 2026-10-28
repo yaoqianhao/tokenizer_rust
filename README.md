@@ -161,6 +161,17 @@ from transformers import AutoTokenizer
 tok = AutoTokenizer.from_pretrained("artifacts/tok")
 ```
 
+### 预分词：`Whitespace` 与 `WhitespaceSplit` 不等价
+
+训练侧用哪种，推理侧就必须用同一种，否则词表对不上：
+
+| 配置 | 等价 HF 实现 | `"hello, world!"` 的 piece |
+| --- | --- | --- |
+| `Whitespace` | 正则 `\w+\|[^\w\s]+`（标点单独成段） | `hello` `,` `world` `!` |
+| `WhitespaceSplit` | 仅按空白切分并丢弃空白（不切标点） | `hello,` `world!` |
+
+行为变更（含破坏性修复）统一记录在 [CHANGELOG.md](CHANGELOG.md)。
+
 ## 开发
 
 一键复现 CI 的三条命令：

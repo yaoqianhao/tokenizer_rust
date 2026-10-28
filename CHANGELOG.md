@@ -1,0 +1,53 @@
+# Changelog
+
+本文件记录所有对外可见的行为变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
+版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
+
+> 0.x 阶段：`MINOR` 版本内也可能包含**行为破坏性修复**（与 HF 语义对齐所必需），
+> 此类条目一律在 `### Changed` 下显式标注 **BREAKING**，并在正文说明受影响的输入与迁移方式。
+
+## [Unreleased]
+
+### Changed
+
+- **BREAKING** `pre_tokenizer = Whitespace` 的切分语义修正为 HF 等价实现（正则 `\w+|[^\w\s]+`）：
+  连续 word 字符成一段、连续「非空白且非 word」符号成一段，空白丢弃。
+  旧实现与 `WhitespaceSplit` 完全相同（只按空白切、不切标点），导致 `"world!"` 产出 `["world!"]`
+  而 HF 产出 `["world", "!"]`。
+  - 受影响输入：任何含标点 / 符号的文本。
+  - 迁移：词表按 `Whitespace` 训练并依赖旧（不切标点）行为的产物，需用当前版本**重新训练**；
+    若本就希望"只按空白切"，配置应显式改为 `WhitespaceSplit`（其语义未变）。
+- **BREAKING** 配置解析失败不再静默降级：`from_tokenizer_json` 中 `truncation` / `padding`
+  反序列化错误按 `TokenizerError` 上抛（旧实现用 `.ok()` 丢弃，畸形配置会"加载成功"但静默不生效）；
+  各配置结构体启用 `deny_unknown_fields`，未知字段直接报错。
+  - 迁移：原先能加载的畸形 `tokenizer.json` 现在会返回 `Err`，需修正字段或移除多余键。
+- **BREAKING** 标点判定由"ASCII + 部分类别"改为严格 Unicode `P*`（Pc/Pd/Pe/Pf/Pi/Po/Ps）：
+  emoji（So）、数学符号（Sm）、货币符号（Sc）不再被当作标点拆开。
+  - 受影响：`BertPreTokenizer`、`Punctuation` 预分词对非 ASCII 文本的切分结果。
+  - WordPiece 侧随之与 HF 对齐：整词 OOV 退化为**单个** `[UNK]`，而非逐字符多个 `[UNK]`。
+- `Unigram` 训练器的剪枝日志默认静默（库代码不再无条件写 stderr），设置环境变量
+  `TOK_VERBOSE=1` 可恢复逐轮输出。
+
+### Fixed
+
+- `Unigram` 剪枝轮次日志中"剪枝前词表大小"计算错误（`n + n/shrink - n` 等同于错值），
+  改为在剪枝前快照 `pieces.len()`。
+- `NormalizedString::convert_offsets_from` 增加 `debug_assert`：debug 构建下与二分的
+  `convert_offsets` 逐次对拍，游标复用导致的非单调 / 跨空洞偏移错误可被测试直接捕获。
+- `encode` 长文本的 O(n²) 退化（段 × 分隔符双重遍历），长文本缩放恢复线性。
+- 外部 `tokenizer.json` 装配时特殊 token 角色丢失：`unk/bos/eos/cls/sep/mask` 从 `added_tokens`
+  推断并逐槽位补齐（不覆盖显式配置），`unk` 缺失时回退到模型节声明的 `unk_token`。
+
+### Added
+
+- `tok-cli`：`tok compare` 子命令（与 HF 产物逐条比对，支持 `--strict`）。
+- `tok-cli` 端到端集成测试 13 例，直接 spawn `CARGO_BIN_EXE_tok-cli`，覆盖
+  `train / encode / decode / inspect / compare`，报错契约锁定为「`错误:` 开头 + 非零退出码」。
+- HF 对齐基准 `crates/tok-pipeline/tests/hf_parity_golden.rs`，期望值来自 HF `tokenizers`
+  离线录制结果（`tests/data/*.json`），CI 因此无需 Python 与网络。
+- GitHub Actions CI（`.github/workflows/ci.yml`）：`lint` / `test`（linux + windows）/
+  `hf-parity-golden` / `cli-e2e` 四道门禁。
+
+### Removed
+
+- `crates/tok-models/tests/scratch_debug.rs`（WordPiece 手工调试草稿，从未入库，`.gitignore` 的 `scratch_*` 覆盖；相关行为已由正式单测覆盖）。
