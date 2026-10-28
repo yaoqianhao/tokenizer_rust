@@ -6,6 +6,7 @@
 //! * `decode`  ：id 序列 → 文本
 //! * `inspect` ：体检 tokenizer.json 结构摘要 + 目录产物清单
 //! * `compare` ：两个 tokenizer 逐条比对编码 id（自洽校验 / 跨版本回归）
+//! * `eval`    ：语料级量化评测（tok/char、UNK 率、round-trip 率、吞吐）
 
 mod commands;
 
@@ -26,7 +27,8 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// 训练：语料 → HF fast tokenizer 三件套
-    Train(commands::TrainArgs),
+    // Train 参数最多（模型 / 预分词 / 后处理 / 解码器 / 词表），装箱避免拖大整个枚举
+    Train(Box<commands::TrainArgs>),
     /// 编码：文本 → id 序列
     Encode(commands::EncodeArgs),
     /// 解码：id 序列 → 文本
@@ -35,16 +37,19 @@ enum Command {
     Inspect(commands::InspectArgs),
     /// 比对：两个 tokenizer 对同一批文本的编码 id 是否一致
     Compare(commands::CompareArgs),
+    /// 语料级评测：tok/char、UNK 率、round-trip 率与吞吐
+    Eval(commands::EvalArgs),
 }
 
 fn main() {
     let cli = Cli::parse();
     let outcome: Result<()> = match cli.command {
-        Command::Train(args) => commands::run_train(args),
+        Command::Train(args) => commands::run_train(*args),
         Command::Encode(args) => commands::run_encode(args),
         Command::Decode(args) => commands::run_decode(args),
         Command::Inspect(args) => commands::run_inspect(args),
         Command::Compare(args) => commands::run_compare(args),
+        Command::Eval(args) => commands::run_eval(args),
     };
     if let Err(err) = outcome {
         eprintln!("错误: {err}");
