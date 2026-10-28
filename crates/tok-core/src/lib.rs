@@ -25,8 +25,12 @@ pub use config::{
     TruncationStrategy,
 };
 pub use error::{Result, TokenizerError};
-pub use traits::{Decoder, Funnel, Model, ModelFunnel, Normalizer, PostProcessor, PreTokenizer, Trainer};
-pub use types::{Alignment, Encoding, NormalizedString, Offset, PreToken, SplitDelimiterBehavior, Token};
+pub use traits::{
+    Decoder, Funnel, Model, ModelFunnel, Normalizer, PostProcessor, PreTokenizer, Trainer,
+};
+pub use types::{
+    Alignment, Encoding, NormalizedString, Offset, PreToken, SplitDelimiterBehavior, Token,
+};
 pub use vocabulary::{AddedVocabulary, IdLayout, SplitUnit, TokenName, Vocabulary};
 
 /// 流水线层号常量，用于错误定位（0 = 门面层）。

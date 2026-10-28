@@ -16,13 +16,17 @@ use tok_core::{Result, TokenizerError};
 use tok_models::{MergeSpec, ModelConfig};
 
 pub use tok_pipeline::hf::{
-    HF_SCHEMA_VERSION, HfTokenizerJson, SPECIAL_TOKENS_MAP_JSON, TOKENIZER_CONFIG_JSON, TOKENIZER_JSON, TokenRoles,
-    added_tokens_decoder, special_tokens_map, tokenizer_config, validate_tokenizer_json, write_json,
+    added_tokens_decoder, special_tokens_map, tokenizer_config, validate_tokenizer_json,
+    write_json, HfTokenizerJson, TokenRoles, HF_SCHEMA_VERSION, SPECIAL_TOKENS_MAP_JSON,
+    TOKENIZER_CONFIG_JSON, TOKENIZER_JSON,
 };
 
 /// 构造 IO 类错误（`TokenizerError` 只暴露了部分便捷构造器）。
 fn io_err(message: impl Into<String>) -> TokenizerError {
-    TokenizerError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, message.into()))
+    TokenizerError::Io(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        message.into(),
+    ))
 }
 
 /// 一个目录里的 HF tokenizer 产物清单。
@@ -67,7 +71,9 @@ pub fn inventory(dir: &Path) -> Result<ArtifactInventory> {
             TOKENIZER_JSON => inv.tokenizer_json = true,
             TOKENIZER_CONFIG_JSON => inv.tokenizer_config_json = true,
             SPECIAL_TOKENS_MAP_JSON => inv.special_tokens_map_json = true,
-            "vocab.json" | "merges.txt" | "vocab.txt" | "added_tokens.json" => inv.others.push(path),
+            "vocab.json" | "merges.txt" | "vocab.txt" | "added_tokens.json" => {
+                inv.others.push(path)
+            }
             _ => {}
         }
     }
@@ -86,9 +92,9 @@ pub fn load_vocab_json(path: &Path) -> Result<BTreeMap<String, u32>> {
         .ok_or_else(|| TokenizerError::config("vocab.json 顶层必须是对象"))?;
     let mut out = BTreeMap::new();
     for (token, id) in obj {
-        let id = id
-            .as_u64()
-            .ok_or_else(|| TokenizerError::config(format!("vocab.json 中 '{}' 的 id 不是整数", token)))?;
+        let id = id.as_u64().ok_or_else(|| {
+            TokenizerError::config(format!("vocab.json 中 '{}' 的 id 不是整数", token))
+        })?;
         out.insert(token.clone(), id as u32);
     }
     Ok(out)
@@ -201,7 +207,10 @@ mod tests {
         }
 
         let inv = inventory(&dir).unwrap();
-        assert!(!inv.is_loadable_fast(), "只有 legacy 资产时不算 fast 可加载");
+        assert!(
+            !inv.is_loadable_fast(),
+            "只有 legacy 资产时不算 fast 可加载"
+        );
         assert_eq!(inv.others.len(), 2);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -211,10 +220,17 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("tok_compat_hf_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
 
-        let vocab: BTreeMap<String, u32> = [("a".to_string(), 0u32), ("b".to_string(), 1), ("<unk>".to_string(), 2)]
-            .into_iter()
-            .collect();
-        let roles = TokenRoles { unk_token: Some("<unk>".to_string()), ..TokenRoles::default() };
+        let vocab: BTreeMap<String, u32> = [
+            ("a".to_string(), 0u32),
+            ("b".to_string(), 1),
+            ("<unk>".to_string(), 2),
+        ]
+        .into_iter()
+        .collect();
+        let roles = TokenRoles {
+            unk_token: Some("<unk>".to_string()),
+            ..TokenRoles::default()
+        };
         let cfg = tok_pipeline::byte_level_bpe(vocab, Vec::new(), roles);
         let tk = Tokenizer::from_config(&cfg).unwrap();
         let out = dir.join("hf");
@@ -226,7 +242,11 @@ mod tests {
         // 回读并比对自身（同一实现内自洽）
         let tk2 = tok_pipeline::load_tokenizer_json(&out.join(TOKENIZER_JSON)).unwrap();
         let diffs = diff_ids(&tk, &tk2, &["ab".to_string(), "a b".to_string()]).unwrap();
-        assert!(diffs.iter().all(|d| d.is_match()), "回读后编码应逐 id 一致: {:?}", diffs);
+        assert!(
+            diffs.iter().all(|d| d.is_match()),
+            "回读后编码应逐 id 一致: {:?}",
+            diffs
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

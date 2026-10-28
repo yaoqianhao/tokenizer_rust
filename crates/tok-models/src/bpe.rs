@@ -9,8 +9,8 @@
 use ahash::AHashMap;
 use serde::{Deserialize, Serialize};
 use tok_core::{
-    AddedToken, Encoding, Model, Result, Token, TokenizerError, Trainer, TrainerArtifact, TrainerParams,
-    Vocabulary, layer,
+    layer, AddedToken, Encoding, Model, Result, Token, TokenizerError, Trainer, TrainerArtifact,
+    TrainerParams, Vocabulary,
 };
 
 /// HF `merges` 的两种写法：`["a","b"]` 与 `"a b"`。
@@ -35,7 +35,10 @@ impl MergeSpec {
                     (Some(a), Some(b)) if !a.is_empty() && !b.is_empty() => {
                         Ok((a.to_string(), b.to_string()))
                     }
-                    _ => Err(TokenizerError::config(format!("无法解析 merges 元素: '{}'", s))),
+                    _ => Err(TokenizerError::config(format!(
+                        "无法解析 merges 元素: '{}'",
+                        s
+                    ))),
                 }
             }
         }
@@ -73,7 +76,9 @@ impl BpeModel {
     pub fn new(vocab: Vocabulary, merges: Vec<(String, String)>) -> Self {
         let mut merge_ranks = AHashMap::new();
         for (i, (a, b)) in merges.iter().enumerate() {
-            merge_ranks.entry((a.clone(), b.clone())).or_insert(i as u32);
+            merge_ranks
+                .entry((a.clone(), b.clone()))
+                .or_insert(i as u32);
         }
         Self {
             vocab,
@@ -95,7 +100,9 @@ impl BpeModel {
     }
 
     pub fn unk_id(&self) -> Option<u32> {
-        self.unk_token.as_ref().and_then(|t| self.vocab.token_to_id(t))
+        self.unk_token
+            .as_ref()
+            .and_then(|t| self.vocab.token_to_id(t))
     }
 
     fn next_rand(&self) -> f64 {
@@ -104,7 +111,8 @@ impl BpeModel {
         x ^= x >> 12;
         x ^= x << 25;
         x ^= x >> 27;
-        self.rng_state.store(x, std::sync::atomic::Ordering::Relaxed);
+        self.rng_state
+            .store(x, std::sync::atomic::Ordering::Relaxed);
         let v = x.wrapping_mul(0x2545_F491_4F6C_DD1D);
         (v >> 11) as f64 / (1u64 << 53) as f64
     }
@@ -149,7 +157,11 @@ impl BpeModel {
     /// 单个符号 → Token（含 byte-fallback 与 unk 处理）。
     fn symbol_to_tokens(&self, sym: &Symbol) -> Result<Vec<Token>> {
         if let Some(id) = self.vocab.token_to_id(&sym.text) {
-            return Ok(vec![Token { id, value: sym.text.clone(), offsets: (sym.start, sym.end) }]);
+            return Ok(vec![Token {
+                id,
+                value: sym.text.clone(),
+                offsets: (sym.start, sym.end),
+            }]);
         }
         if self.byte_fallback {
             let mut out = Vec::with_capacity(sym.text.len());
@@ -157,7 +169,11 @@ impl BpeModel {
             for (k, b) in sym.text.as_bytes().iter().enumerate() {
                 let name = format!("<0x{:02X}>", b);
                 match self.vocab.token_to_id(&name) {
-                    Some(id) => out.push(Token { id, value: name, offsets: (sym.start + k, sym.start + k + 1) }),
+                    Some(id) => out.push(Token {
+                        id,
+                        value: name,
+                        offsets: (sym.start + k, sym.start + k + 1),
+                    }),
                     None => {
                         ok = false;
                         break;
@@ -169,10 +185,17 @@ impl BpeModel {
             }
         }
         match self.unk_id() {
-            Some(id) => Ok(vec![Token { id, value: sym.text.clone(), offsets: (sym.start, sym.end) }]),
+            Some(id) => Ok(vec![Token {
+                id,
+                value: sym.text.clone(),
+                offsets: (sym.start, sym.end),
+            }]),
             None => Err(TokenizerError::layer(
                 layer::MODEL,
-                format!("token '{}' 未登录且未配置 unk_token / byte_fallback", sym.text),
+                format!(
+                    "token '{}' 未登录且未配置 unk_token / byte_fallback",
+                    sym.text
+                ),
             )),
         }
     }
@@ -255,11 +278,19 @@ impl Model for BpeModel {
         }
         if self.ignore_merges && self.vocab.contains(sequence) {
             let id = self.vocab.token_to_id(sequence).unwrap();
-            return Ok(vec![Token { id, value: sequence.to_string(), offsets: (0, sequence.len()) }]);
+            return Ok(vec![Token {
+                id,
+                value: sequence.to_string(),
+                offsets: (0, sequence.len()),
+            }]);
         }
         let mut syms: Vec<Symbol> = sequence
             .char_indices()
-            .map(|(i, c)| Symbol { text: c.to_string(), start: i, end: i + c.len_utf8() })
+            .map(|(i, c)| Symbol {
+                text: c.to_string(),
+                start: i,
+                end: i + c.len_utf8(),
+            })
             .collect();
         self.apply_affixes(&mut syms);
         let merged = self.merge_symbols(syms);
@@ -299,8 +330,14 @@ impl Model for BpeModel {
         let mut t = BpeTrainer::new(params.clone());
         t.byte_fallback = self.byte_fallback || params.byte_fallback;
         t.unk_token = self.unk_token.clone();
-        t.continuing_subword_prefix = self.continuing_subword_prefix.clone().or(params.continuing_subword_prefix.clone());
-        t.end_of_word_suffix = self.end_of_word_suffix.clone().or(params.end_of_word_suffix.clone());
+        t.continuing_subword_prefix = self
+            .continuing_subword_prefix
+            .clone()
+            .or(params.continuing_subword_prefix.clone());
+        t.end_of_word_suffix = self
+            .end_of_word_suffix
+            .clone()
+            .or(params.end_of_word_suffix.clone());
         Some(Box::new(t))
     }
 
@@ -315,13 +352,18 @@ impl Model for BpeModel {
                 self.merges = merges.clone();
                 self.merge_ranks.clear();
                 for (i, (a, b)) in self.merges.iter().enumerate() {
-                    self.merge_ranks.entry((a.clone(), b.clone())).or_insert(i as u32);
+                    self.merge_ranks
+                        .entry((a.clone(), b.clone()))
+                        .or_insert(i as u32);
                 }
                 Ok(())
             }
             other => Err(TokenizerError::layer(
                 layer::MODEL,
-                format!("BpeModel 无法消费 artifact kind={:?}", std::mem::discriminant(other)),
+                format!(
+                    "BpeModel 无法消费 artifact kind={:?}",
+                    std::mem::discriminant(other)
+                ),
             )),
         }
     }
@@ -388,7 +430,10 @@ impl BpeTrainer {
         }
         if let Some(max) = self.max_token_length {
             if syms.len() > max {
-                let unk = self.unk_token.clone().unwrap_or_else(|| "[UNK]".to_string());
+                let unk = self
+                    .unk_token
+                    .clone()
+                    .unwrap_or_else(|| "[UNK]".to_string());
                 return vec![unk];
             }
         }
@@ -415,7 +460,8 @@ impl BpeTrainer {
         let mut dropped: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         if let Some(limit) = self.limit_alphabet {
             if alphabet.len() > limit {
-                let mut items: Vec<(String, u64)> = freq.iter().map(|(k, v)| (k.clone(), *v)).collect();
+                let mut items: Vec<(String, u64)> =
+                    freq.iter().map(|(k, v)| (k.clone(), *v)).collect();
                 // 频次降序；频次相同按字符序，保证确定性
                 items.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
                 let kept: std::collections::BTreeSet<String> =
@@ -431,7 +477,6 @@ impl BpeTrainer {
         alphabet.sort();
         (alphabet, dropped)
     }
-
 }
 
 impl Trainer for BpeTrainer {
@@ -454,16 +499,18 @@ impl Trainer for BpeTrainer {
 
     fn finish(&mut self) -> Result<TrainerArtifact> {
         if self.fed == 0 {
-            return Err(TokenizerError::layer(layer::MODEL, "BPE 训练：语料为空，无法训练"));
+            return Err(TokenizerError::layer(
+                layer::MODEL,
+                "BPE 训练：语料为空，无法训练",
+            ));
         }
 
         // 1. limit_alphabet 后需要把被丢弃字符映射为 unk（防止训练/推理不一致）
         let (alphabet, dropped) = self.build_alphabet();
         if !dropped.is_empty() {
-            let unk = self
-                .unk_token
-                .clone()
-                .ok_or_else(|| TokenizerError::layer(layer::MODEL, "limit_alphabet 需要配套 unk_token"))?;
+            let unk = self.unk_token.clone().ok_or_else(|| {
+                TokenizerError::layer(layer::MODEL, "limit_alphabet 需要配套 unk_token")
+            })?;
             let mut new_counts: AHashMap<Vec<String>, u64> = AHashMap::new();
             for (word, count) in self.word_counts.iter() {
                 let mapped: Vec<String> = word
@@ -482,8 +529,7 @@ impl Trainer for BpeTrainer {
         }
 
         // 2. 逐个挑选最高频 pair
-        let reserved = self.special_tokens.len()
-            + if self.byte_fallback { 256 } else { 0 };
+        let reserved = self.special_tokens.len() + if self.byte_fallback { 256 } else { 0 };
         let max_tokens = self.vocab_size.saturating_sub(reserved);
         let mut merges: Vec<(String, String)> = Vec::new();
         let mut merged_symbols: Vec<String> = Vec::new(); // merge 顺序对应的新 token
@@ -584,7 +630,10 @@ pub fn bpe_from_artifact(
             m.byte_fallback = byte_fallback;
             Ok(m)
         }
-        _ => Err(TokenizerError::layer(layer::MODEL, "artifact 不是 BPE 类型")),
+        _ => Err(TokenizerError::layer(
+            layer::MODEL,
+            "artifact 不是 BPE 类型",
+        )),
     }
 }
 
@@ -598,7 +647,8 @@ pub fn encode_words(model: &BpeModel, words: &[String]) -> Result<Encoding> {
             enc.ids.push(t.id);
             enc.type_ids.push(0);
             enc.tokens.push(t.value);
-            enc.offsets.push((cursor + t.offsets.0, cursor + t.offsets.1));
+            enc.offsets
+                .push((cursor + t.offsets.0, cursor + t.offsets.1));
             enc.attention_mask.push(1);
             let is_special = model
                 .get_vocab()
@@ -619,7 +669,11 @@ mod tests {
     use super::*;
 
     fn train(words: &[&str], vocab_size: usize) -> BpeModel {
-        let params = TrainerParams { vocab_size, min_frequency: 2, ..Default::default() };
+        let params = TrainerParams {
+            vocab_size,
+            min_frequency: 2,
+            ..Default::default()
+        };
         let mut t = BpeTrainer::new(params);
         let group: Vec<String> = words.iter().map(|w| w.to_string()).collect();
         t.feed_groups(&[group]).unwrap();
@@ -627,7 +681,9 @@ mod tests {
         let mut m = bpe_from_artifact(&art, Some("<unk>".into()), None, None, false).unwrap();
         // unk 追加到末尾（训练流程由 pipeline 的 special_tokens 完成，这里显式补）
         let next = m.get_vocab().max_id() + 1;
-        m.get_vocab_mut().add_special(AddedToken::new("<unk>", true), next).unwrap();
+        m.get_vocab_mut()
+            .add_special(AddedToken::new("<unk>", true), next)
+            .unwrap();
         m.fuse_unk = true;
         m
     }
@@ -653,7 +709,12 @@ mod tests {
 
     #[test]
     fn byte_fallback_uses_byte_tokens() {
-        let params = TrainerParams { vocab_size: 400, min_frequency: 1, byte_fallback: true, ..Default::default() };
+        let params = TrainerParams {
+            vocab_size: 400,
+            min_frequency: 1,
+            byte_fallback: true,
+            ..Default::default()
+        };
         let mut t = BpeTrainer::new(params);
         t.feed_groups(&[vec!["ab".to_string()]]).unwrap();
         let art = t.finish().unwrap();
@@ -678,7 +739,11 @@ mod tests {
 
     #[test]
     fn vocab_layout_is_stable_and_deterministic() {
-        let params = TrainerParams { vocab_size: 12, min_frequency: 1, ..Default::default() };
+        let params = TrainerParams {
+            vocab_size: 12,
+            min_frequency: 1,
+            ..Default::default()
+        };
         let mut t1 = BpeTrainer::new(params.clone());
         let mut t2 = BpeTrainer::new(params);
         t1.feed_groups(&[vec!["abc".into(), "abd".into()]]).unwrap();
@@ -699,10 +764,17 @@ mod tests {
         let mut t = BpeTrainer::new(params);
         t.feed_groups(&[vec!["abc".into()]]).unwrap();
         let art = t.finish().unwrap();
-        let TrainerArtifact::Bpe { vocab, .. } = art else { panic!() };
+        let TrainerArtifact::Bpe { vocab, .. } = art else {
+            panic!()
+        };
         for s in ["<unk>", "<s>", "</s>"] {
             let id = vocab.iter().find(|(t, _)| t == s).unwrap().1;
-            assert!(id as usize >= vocab.len() - 3, "special 必须落在末尾：{} -> {}", s, id);
+            assert!(
+                id as usize >= vocab.len() - 3,
+                "special 必须落在末尾：{} -> {}",
+                s,
+                id
+            );
         }
     }
 }

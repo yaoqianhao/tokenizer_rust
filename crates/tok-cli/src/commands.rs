@@ -6,13 +6,13 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use serde_json::{Value, json};
-use tok_compat::{TOKENIZER_JSON, inventory};
+use serde_json::{json, Value};
+use tok_compat::{inventory, TOKENIZER_JSON};
 use tok_core::{PaddingParams, Result, TokenizerError, TrainerParams, TruncationParams};
 use tok_decoders::DecoderConfig;
 use tok_models::ModelConfig;
 use tok_normalizers::NormalizerConfig;
-use tok_pipeline::{PipelineConfig, TokenRoles, Tokenizer, load_tokenizer_json};
+use tok_pipeline::{load_tokenizer_json, PipelineConfig, TokenRoles, Tokenizer};
 use tok_pretok::{BehaviorSpec, PreTokenizerConfig};
 use tok_trainers::CorpusReader;
 
@@ -29,12 +29,13 @@ pub struct TrainArgs {
     /// 目标词表规模
     #[arg(long, default_value_t = 30000)]
     pub vocab_size: usize,
-    /// 模型类型：bpe | wordpiece | wordlevel
+    /// 模型类型：bpe | wordpiece | wordlevel | unigram
     #[arg(long, default_value = "bpe")]
     pub model: String,
     /// 预分词器：bytelevel | whitespace | whitespace-split | bert | metaspace | digits | punctuation | none
-    #[arg(long = "pre-tokenizer", default_value = "bytelevel")]
-    pub pre_tokenizer: String,
+    /// （缺省时按模型推断：unigram → metaspace，其余 → bytelevel）
+    #[arg(long = "pre-tokenizer")]
+    pub pre_tokenizer: Option<String>,
     /// 归一化器（可重复，按顺序组成 Sequence）：lowercase | nfc | nfd | nfkc | nfkd | strip-accents
     #[arg(long = "normalizer", num_args = 0..)]
     pub normalizer: Vec<String>,
@@ -65,13 +66,36 @@ pub struct TrainArgs {
     /// `config.json` 的 model_type：auto（按模型推断）| none（不写）| 自定义值
     #[arg(long = "hf-model-type", default_value = "auto")]
     pub hf_model_type: String,
+    /// Unigram：候选 piece 最大字符数（SentencePiece max_piece_length）
+    #[arg(long = "max-piece-length", default_value_t = 16)]
+    pub max_piece_length: usize,
+    /// Unigram：每轮剪枝保留比例（SentencePiece shrinking_factor）
+    #[arg(long = "shrinking-factor", default_value_t = 0.75)]
+    pub shrinking_factor: f64,
+    /// Unigram：每个剪枝阶段内的 EM 迭代次数
+    #[arg(long = "sub-iterations", default_value_t = 2)]
+    pub sub_iterations: usize,
 }
 
 pub fn run_train(args: TrainArgs) -> Result<()> {
-    let model = build_model(&args.model, args.byte_fallback, &args.special)?;
+    // SentencePiece 风格默认 Metaspace 预分词；其余模型沿用 bytelevel
+    let pre_name = args.pre_tokenizer.clone().unwrap_or_else(|| {
+        if args.model == "unigram" {
+            "metaspace".to_string()
+        } else {
+            "bytelevel".to_string()
+        }
+    });
+    // Unigram 必须有 unk：未登录字符需要兜底节点，否则 Viterbi 无连通路径
+    let mut specials = args.special.clone();
+    if args.model == "unigram" && !specials.iter().any(|s| s.to_lowercase().contains("unk")) {
+        specials.insert(0, "<unk>".to_string());
+    }
+
+    let model = build_model(&args.model, args.byte_fallback, &specials)?;
     let normalizer = build_normalizer(&args.normalizer)?;
-    let pre_tokenizer = build_pre_tokenizer(&args.pre_tokenizer)?;
-    let decoder = build_decoder(&args.model, &args.pre_tokenizer);
+    let pre_tokenizer = build_pre_tokenizer(&pre_name)?;
+    let decoder = build_decoder(&args.model, &pre_name, args.byte_fallback);
 
     let cfg = PipelineConfig {
         normalizer,
@@ -79,8 +103,7 @@ pub fn run_train(args: TrainArgs) -> Result<()> {
         model,
         post_processor: None,
         decoder,
-        added_tokens: args
-            .special
+        added_tokens: specials
             .iter()
             .map(|s| tok_core::AddedToken::new(s.clone(), true))
             .collect(),
@@ -90,17 +113,26 @@ pub fn run_train(args: TrainArgs) -> Result<()> {
         roles: TokenRoles::default(),
     };
 
-    let mut tokenizer = Tokenizer::from_config(&cfg).map_err(|e| {
-        TokenizerError::config(format!("装配失败（前置配置有误）: {e}"))
-    })?;
+    let mut tokenizer = Tokenizer::from_config(&cfg)
+        .map_err(|e| TokenizerError::config(format!("装配失败（前置配置有误）: {e}")))?;
 
     let mut params = TrainerParams::of(args.vocab_size);
     params.min_frequency = args.min_frequency;
-    params.special_tokens = args.special.clone();
-    if args.pre_tokenizer == "bytelevel" {
+    params.special_tokens = specials.clone();
+    if pre_name == "bytelevel" {
         // 字节级 BPE：词表至少覆盖 256 个字节 + 特殊 token
         params.initial_alphabet = tok_core::byte_level::byte_alphabet();
-        let floor = 256 + args.special.len() + 8;
+        let floor = 256 + specials.len() + 8;
+        if params.vocab_size < floor {
+            params.vocab_size = floor;
+        }
+    }
+    if args.model == "unigram" {
+        params.max_piece_length = Some(args.max_piece_length);
+        params.shrinking_factor = Some(args.shrinking_factor);
+        params.n_sub_iterations = Some(args.sub_iterations);
+        // Unigram 的目标规模要能容纳 special + 256 字节 token（byte_fallback 时）
+        let floor = specials.len() + if args.byte_fallback { 256 } else { 0 } + 16;
         if params.vocab_size < floor {
             params.vocab_size = floor;
         }
@@ -120,7 +152,10 @@ pub fn run_train(args: TrainArgs) -> Result<()> {
     };
     let files = tokenizer.save_pretrained_with_config(&args.out, identity)?;
 
-    println!("训练完成：{}", serde_json::to_string_pretty(&serde_json::to_value(&report)?)?);
+    println!(
+        "训练完成：{}",
+        serde_json::to_string_pretty(&serde_json::to_value(&report)?)?
+    );
     if args.report_json {
         println!(
             "落盘文件：{}",
@@ -282,9 +317,18 @@ pub fn run_inspect(args: InspectArgs) -> Result<()> {
     let value: Value = serde_json::from_str(&raw)?;
     tok_pipeline::validate_tokenizer_json(&value)?;
 
-    let vocab_size = value["model"]["vocab"].as_object().map(|o| o.len()).unwrap_or(0);
-    let merges = value["model"]["merges"].as_array().map(|a| a.len()).unwrap_or(0);
-    let added = value["added_tokens"].as_array().map(|a| a.len()).unwrap_or(0);
+    let vocab_size = value["model"]["vocab"]
+        .as_object()
+        .map(|o| o.len())
+        .unwrap_or(0);
+    let merges = value["model"]["merges"]
+        .as_array()
+        .map(|a| a.len())
+        .unwrap_or(0);
+    let added = value["added_tokens"]
+        .as_array()
+        .map(|a| a.len())
+        .unwrap_or(0);
 
     println!(
         "{}",
@@ -305,21 +349,26 @@ pub fn run_inspect(args: InspectArgs) -> Result<()> {
 
     if let Some(parent) = path.parent() {
         if let Ok(inv) = inventory(parent) {
-            println!("目录产物体检：{}", serde_json::to_string_pretty(&json!({
-                "dir": parent,
-                "tokenizer_json": inv.tokenizer_json,
-                "tokenizer_config_json": inv.tokenizer_config_json,
-                "special_tokens_map_json": inv.special_tokens_map_json,
-                "complete": inv.is_complete(),
-                "others": inv.others,
-            }))?);
+            println!(
+                "目录产物体检：{}",
+                serde_json::to_string_pretty(&json!({
+                    "dir": parent,
+                    "tokenizer_json": inv.tokenizer_json,
+                    "tokenizer_config_json": inv.tokenizer_config_json,
+                    "special_tokens_map_json": inv.special_tokens_map_json,
+                    "complete": inv.is_complete(),
+                    "others": inv.others,
+                }))?
+            );
         }
     }
 
     if args.head > 0 {
         if let Some(obj) = value["model"]["vocab"].as_object() {
-            let mut pairs: Vec<(&String, u64)> =
-                obj.iter().map(|(k, v)| (k, v.as_u64().unwrap_or(u64::MAX))).collect();
+            let mut pairs: Vec<(&String, u64)> = obj
+                .iter()
+                .map(|(k, v)| (k, v.as_u64().unwrap_or(u64::MAX)))
+                .collect();
             pairs.sort_by_key(|(_, id)| *id);
             for (token, id) in pairs.into_iter().take(args.head) {
                 println!("{:>6}  {}", id, token);
@@ -371,8 +420,14 @@ fn build_model(kind: &str, byte_fallback: bool, specials: &[String]) -> Result<M
             unk_token: unk.unwrap_or_else(|| "[UNK]".to_string()),
             vocab: BTreeMap::new(),
         }),
+        // Unigram 无空词表语义：训练起点放一个 unk 占位，训练完成后由 artifact 整体替换
+        "unigram" => Ok(ModelConfig::Unigram {
+            unk_id: Some(0),
+            byte_fallback,
+            vocab: vec![(unk.unwrap_or_else(|| "<unk>".to_string()), 0.0)],
+        }),
         other => Err(TokenizerError::config(format!(
-            "未知 --model: '{}'（可选 bpe / wordpiece / wordlevel）",
+            "未知 --model: '{}'（可选 bpe / wordpiece / wordlevel / unigram）",
             other
         ))),
     }
@@ -435,7 +490,7 @@ fn build_pre_tokenizer(kind: &str) -> Result<Option<PreTokenizerConfig>> {
     })
 }
 
-fn build_decoder(model: &str, pre: &str) -> Option<DecoderConfig> {
+fn build_decoder(model: &str, pre: &str, byte_fallback: bool) -> Option<DecoderConfig> {
     match (model, pre) {
         ("bpe", "bytelevel") => Some(DecoderConfig::ByteLevel {
             add_prefix_space: false,
@@ -447,9 +502,29 @@ fn build_decoder(model: &str, pre: &str) -> Option<DecoderConfig> {
             prepend_scheme: "always".to_string(),
             split: true,
         }),
+        // SentencePiece 风格：▁ → 空格；若启用 byte_fallback，再把 <0xXX> 还原成字节
+        ("unigram", "metaspace") | ("unigram", "none") => {
+            let metaspace = DecoderConfig::Metaspace {
+                replacement: "\u{2581}".to_string(),
+                prepend_scheme: "always".to_string(),
+                split: true,
+            };
+            if byte_fallback {
+                Some(DecoderConfig::Sequence {
+                    decoders: vec![metaspace, DecoderConfig::ByteFallback],
+                })
+            } else {
+                Some(metaspace)
+            }
+        }
         ("wordpiece", _) => Some(DecoderConfig::WordPiece {
             prefix: "##".to_string(),
             cleanup: true,
+        }),
+        (_, "metaspace") => Some(DecoderConfig::Metaspace {
+            replacement: "\u{2581}".to_string(),
+            prepend_scheme: "always".to_string(),
+            split: true,
         }),
         _ => None,
     }
@@ -457,7 +532,11 @@ fn build_decoder(model: &str, pre: &str) -> Option<DecoderConfig> {
 
 /// 预留：把 `--truncation/--padding` 透传进 pipeline（当前仅内部自检使用）。
 #[allow(dead_code)]
-fn apply_io_params(tk: &mut Tokenizer, trunc: Option<TruncationParams>, pad: Option<PaddingParams>) {
+fn apply_io_params(
+    tk: &mut Tokenizer,
+    trunc: Option<TruncationParams>,
+    pad: Option<PaddingParams>,
+) {
     tk.set_truncation(trunc);
     tk.set_padding(pad);
 }

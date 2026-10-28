@@ -17,7 +17,10 @@ pub use tok_core::SplitDelimiterBehavior;
 #[serde(untagged)]
 pub enum BehaviorSpec {
     Plain(String),
-    Tagged { #[serde(rename = "SplitDelimiterBehavior")] behavior: String },
+    Tagged {
+        #[serde(rename = "SplitDelimiterBehavior")]
+        behavior: String,
+    },
 }
 
 impl BehaviorSpec {
@@ -32,9 +35,14 @@ impl BehaviorSpec {
         match s {
             "removed" | "Removed" => Ok(SplitDelimiterBehavior::Removed),
             "isolated" | "Isolated" => Ok(SplitDelimiterBehavior::Isolated),
-            "merged_with_previous" | "MergedWithPrevious" => Ok(SplitDelimiterBehavior::MergedWithPrevious),
+            "merged_with_previous" | "MergedWithPrevious" => {
+                Ok(SplitDelimiterBehavior::MergedWithPrevious)
+            }
             "merged_with_next" | "MergedWithNext" => Ok(SplitDelimiterBehavior::MergedWithNext),
-            other => Err(TokenizerError::config(format!("未知 SplitDelimiterBehavior: {}", other))),
+            other => Err(TokenizerError::config(format!(
+                "未知 SplitDelimiterBehavior: {}",
+                other
+            ))),
         }
     }
 }
@@ -162,30 +170,42 @@ impl PreTokenizerWrapper {
             PreTokenizerConfig::Whitespace => PreTokenizerWrapper::Whitespace,
             PreTokenizerConfig::WhitespaceSplit => PreTokenizerWrapper::WhitespaceSplit,
             PreTokenizerConfig::BertPreTokenizer => PreTokenizerWrapper::BertPreTokenizer,
-            PreTokenizerConfig::ByteLevel { add_prefix_space, trim_offsets, use_regex } => {
-                PreTokenizerWrapper::ByteLevel {
-                    regex: fancy(GPT2_BYTE_LEVEL_PATTERN)?,
-                    add_prefix_space: *add_prefix_space,
-                    trim_offsets: *trim_offsets,
-                    use_regex: *use_regex,
-                }
-            }
-            PreTokenizerConfig::Metaspace { replacement, add_prefix_space, prepend_scheme } => {
-                PreTokenizerWrapper::Metaspace {
-                    replacement: replacement.clone(),
-                    add_prefix_space: *add_prefix_space,
-                    prepend_scheme: prepend_scheme.clone().unwrap_or_else(|| {
-                        if *add_prefix_space { "always".to_string() } else { "never".to_string() }
-                    }),
-                }
-            }
-            PreTokenizerConfig::Digits { individual_digits } => {
-                PreTokenizerWrapper::Digits { individual_digits: *individual_digits }
-            }
-            PreTokenizerConfig::Punctuation { behavior } => {
-                PreTokenizerWrapper::Punctuation { behavior: behavior.parse()? }
-            }
-            PreTokenizerConfig::Split { pattern, behavior, invert } => PreTokenizerWrapper::Split {
+            PreTokenizerConfig::ByteLevel {
+                add_prefix_space,
+                trim_offsets,
+                use_regex,
+            } => PreTokenizerWrapper::ByteLevel {
+                regex: fancy(GPT2_BYTE_LEVEL_PATTERN)?,
+                add_prefix_space: *add_prefix_space,
+                trim_offsets: *trim_offsets,
+                use_regex: *use_regex,
+            },
+            PreTokenizerConfig::Metaspace {
+                replacement,
+                add_prefix_space,
+                prepend_scheme,
+            } => PreTokenizerWrapper::Metaspace {
+                replacement: replacement.clone(),
+                add_prefix_space: *add_prefix_space,
+                prepend_scheme: prepend_scheme.clone().unwrap_or_else(|| {
+                    if *add_prefix_space {
+                        "always".to_string()
+                    } else {
+                        "never".to_string()
+                    }
+                }),
+            },
+            PreTokenizerConfig::Digits { individual_digits } => PreTokenizerWrapper::Digits {
+                individual_digits: *individual_digits,
+            },
+            PreTokenizerConfig::Punctuation { behavior } => PreTokenizerWrapper::Punctuation {
+                behavior: behavior.parse()?,
+            },
+            PreTokenizerConfig::Split {
+                pattern,
+                behavior,
+                invert,
+            } => PreTokenizerWrapper::Split {
                 regex: fancy(pattern.as_str())?,
                 behavior: behavior.parse()?,
                 invert: *invert,
@@ -203,7 +223,9 @@ impl PreTokenizerWrapper {
     /// ByteLevel 的 `add_prefix_space` 需要在**原始文本**层面处理，由门面在 S1 之前调用。
     pub fn needs_prefix_space(&self) -> bool {
         match self {
-            PreTokenizerWrapper::ByteLevel { add_prefix_space, .. } => *add_prefix_space,
+            PreTokenizerWrapper::ByteLevel {
+                add_prefix_space, ..
+            } => *add_prefix_space,
             PreTokenizerWrapper::Sequence(v) => v.iter().any(|p| p.needs_prefix_space()),
             _ => false,
         }
@@ -228,7 +250,12 @@ impl PreTokenizerWrapper {
                 ns.split_on_pred(is_punctuation, SplitDelimiterBehavior::Isolated);
                 Ok(())
             }
-            PreTokenizerWrapper::ByteLevel { regex, use_regex, add_prefix_space, trim_offsets: _ } => {
+            PreTokenizerWrapper::ByteLevel {
+                regex,
+                use_regex,
+                add_prefix_space,
+                trim_offsets: _,
+            } => {
                 if *add_prefix_space && !ns.normalized().starts_with(' ') {
                     ns.prepend(" ");
                 }
@@ -240,7 +267,10 @@ impl PreTokenizerWrapper {
                         match m {
                             Ok(m) => hits.push((m.start(), m.end())),
                             Err(e) => {
-                                return Err(TokenizerError::Regex(format!("ByteLevel 匹配失败: {}", e)))
+                                return Err(TokenizerError::Regex(format!(
+                                    "ByteLevel 匹配失败: {}",
+                                    e
+                                )))
                             }
                         }
                     }
@@ -250,10 +280,16 @@ impl PreTokenizerWrapper {
                 }
                 Ok(())
             }
-            PreTokenizerWrapper::Metaspace { replacement, add_prefix_space, prepend_scheme } => {
+            PreTokenizerWrapper::Metaspace {
+                replacement,
+                add_prefix_space,
+                prepend_scheme,
+            } => {
                 let repl = replacement.clone();
+                // HF 语义：仅把 ASCII 空格 0x20 换成 replacement；tab / NBSP / 全角空格等
+                // 其它空白字符原样保留，交由模型（byte_fallback 时落 <0x09>）处理。
                 ns.map_chars(move |c| {
-                    if c.is_whitespace() && c.to_string() != repl {
+                    if c == ' ' && c.to_string() != repl {
                         Some(repl.clone())
                     } else {
                         None
@@ -268,7 +304,8 @@ impl PreTokenizerWrapper {
                     }
                 };
                 if need_prefix && !ns.normalized().starts_with(replacement.as_str()) {
-                    ns.prepend(replacement);
+                    // 插入的 ▁ 与首个字符共享 original 区间，保证首个 token offset 与 HF 一致
+                    ns.prepend_absorbing_next(replacement);
                 }
                 if !replacement.is_empty() {
                     let delims = find_all_str(ns.normalized(), replacement);
@@ -298,12 +335,18 @@ impl PreTokenizerWrapper {
                 ns.split_on_pred(|c| is_punctuation(c), *behavior);
                 Ok(())
             }
-            PreTokenizerWrapper::Split { regex, behavior, invert } => {
+            PreTokenizerWrapper::Split {
+                regex,
+                behavior,
+                invert,
+            } => {
                 let mut delims = Vec::new();
                 for m in regex.find_iter(ns.normalized()) {
                     match m {
                         Ok(m) => delims.push((m.start(), m.end())),
-                        Err(e) => return Err(TokenizerError::Regex(format!("Split 匹配失败: {}", e))),
+                        Err(e) => {
+                            return Err(TokenizerError::Regex(format!("Split 匹配失败: {}", e)))
+                        }
                     }
                 }
                 if *invert {
@@ -345,17 +388,28 @@ impl PreTokenizer for PreTokenizerWrapper {
     fn to_config_json(&self) -> Result<serde_json::Value> {
         match self {
             PreTokenizerWrapper::Whitespace => Ok(serde_json::json!({"type": "Whitespace"})),
-            PreTokenizerWrapper::WhitespaceSplit => Ok(serde_json::json!({"type": "WhitespaceSplit"})),
-            PreTokenizerWrapper::BertPreTokenizer => Ok(serde_json::json!({"type": "BertPreTokenizer"})),
-            PreTokenizerWrapper::ByteLevel { add_prefix_space, trim_offsets, use_regex, .. } => {
-                Ok(serde_json::json!({
-                    "type": "ByteLevel",
-                    "add_prefix_space": add_prefix_space,
-                    "trim_offsets": trim_offsets,
-                    "use_regex": use_regex,
-                }))
+            PreTokenizerWrapper::WhitespaceSplit => {
+                Ok(serde_json::json!({"type": "WhitespaceSplit"}))
             }
-            PreTokenizerWrapper::Metaspace { replacement, prepend_scheme, .. } => Ok(serde_json::json!({
+            PreTokenizerWrapper::BertPreTokenizer => {
+                Ok(serde_json::json!({"type": "BertPreTokenizer"}))
+            }
+            PreTokenizerWrapper::ByteLevel {
+                add_prefix_space,
+                trim_offsets,
+                use_regex,
+                ..
+            } => Ok(serde_json::json!({
+                "type": "ByteLevel",
+                "add_prefix_space": add_prefix_space,
+                "trim_offsets": trim_offsets,
+                "use_regex": use_regex,
+            })),
+            PreTokenizerWrapper::Metaspace {
+                replacement,
+                prepend_scheme,
+                ..
+            } => Ok(serde_json::json!({
                 "type": "Metaspace",
                 "replacement": replacement,
                 "prepend_scheme": prepend_scheme,
@@ -369,7 +423,11 @@ impl PreTokenizer for PreTokenizerWrapper {
                 "type": "Punctuation",
                 "behavior": behavior_name(*behavior),
             })),
-            PreTokenizerWrapper::Split { regex, behavior, invert } => Ok(serde_json::json!({
+            PreTokenizerWrapper::Split {
+                regex,
+                behavior,
+                invert,
+            } => Ok(serde_json::json!({
                 "type": "Split",
                 "pattern": {"Regex": regex.as_str()},
                 "behavior": behavior_name(*behavior),
@@ -420,7 +478,7 @@ mod tests {
 
     fn pt(cfg: &PreTokenizerConfig, text: &str) -> Vec<String> {
         let p = PreTokenizerWrapper::build(cfg).unwrap();
-        let mut ns = NormalizedString::from_str(text);
+        let mut ns = NormalizedString::new(text);
         p.pre_tokenize(&mut ns).unwrap();
         ns.pretokens().into_iter().map(|t| t.value).collect()
     }
@@ -439,7 +497,11 @@ mod tests {
 
     #[test]
     fn byte_level_expands_utf8_bytes() {
-        let cfg = PreTokenizerConfig::ByteLevel { add_prefix_space: false, trim_offsets: false, use_regex: true };
+        let cfg = PreTokenizerConfig::ByteLevel {
+            add_prefix_space: false,
+            trim_offsets: false,
+            use_regex: true,
+        };
         let v = pt(&cfg, "hi");
         assert_eq!(v, vec!["hi"]);
         let v2 = pt(&cfg, "中");
@@ -447,7 +509,11 @@ mod tests {
         // 再对该 piece 做字节级映射 → "ä¸Ń"（3 个字符，3 = UTF-8 字节数）。
         // 若反过来先映射再切分，"Ġ" 等映射字符属 \p{L}，piece 边界会与 HF 不一致。
         assert_eq!(v2, vec!["ä¸Ń"]);
-        assert_eq!(v2[0].chars().count(), 3, "字节级展开后字符数应等于 UTF-8 字节数");
+        assert_eq!(
+            v2[0].chars().count(),
+            3,
+            "字节级展开后字符数应等于 UTF-8 字节数"
+        );
         // ` ?\p{L}+` 使前导空格并入后继 piece（映射为 Ġ）
         let v3 = pt(&cfg, "hi there");
         assert_eq!(v3, vec!["hi", "Ġthere"]);
@@ -455,9 +521,13 @@ mod tests {
 
     #[test]
     fn byte_level_offsets_point_to_original_bytes() {
-        let cfg = PreTokenizerConfig::ByteLevel { add_prefix_space: false, trim_offsets: false, use_regex: true };
+        let cfg = PreTokenizerConfig::ByteLevel {
+            add_prefix_space: false,
+            trim_offsets: false,
+            use_regex: true,
+        };
         let p = PreTokenizerWrapper::build(&cfg).unwrap();
-        let mut ns = NormalizedString::from_str("ab");
+        let mut ns = NormalizedString::new("ab");
         p.pre_tokenize(&mut ns).unwrap();
         let ts = ns.pretokens();
         assert_eq!(ts.len(), 1);
@@ -466,7 +536,12 @@ mod tests {
 
     #[test]
     fn digits_individual() {
-        let v = pt(&PreTokenizerConfig::Digits { individual_digits: true }, "a12b");
+        let v = pt(
+            &PreTokenizerConfig::Digits {
+                individual_digits: true,
+            },
+            "a12b",
+        );
         assert_eq!(v, vec!["a", "1", "2", "b"]);
     }
 
@@ -512,7 +587,9 @@ mod tests {
         let cfg = PreTokenizerConfig::Sequence {
             pretokenizers: vec![
                 PreTokenizerConfig::BertPreTokenizer,
-                PreTokenizerConfig::Digits { individual_digits: true },
+                PreTokenizerConfig::Digits {
+                    individual_digits: true,
+                },
             ],
         };
         let v = pt(&cfg, "ab12");

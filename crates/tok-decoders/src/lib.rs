@@ -6,7 +6,7 @@
 //! 最终由调用方把结果拼接成字符串（`decode_ids`）。
 
 use serde::{Deserialize, Serialize};
-use tok_core::{Decoder, PatternSpec, Result, TokenizerError, Vocabulary, byte_level, layer};
+use tok_core::{byte_level, layer, Decoder, PatternSpec, Result, TokenizerError, Vocabulary};
 
 /// 解码器配置（HF `decoder` 节）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -52,7 +52,10 @@ pub enum DecoderConfig {
         cleanup: bool,
     },
     #[serde(rename = "Replace")]
-    Replace { pattern: PatternSpec, content: String },
+    Replace {
+        pattern: PatternSpec,
+        content: String,
+    },
     #[serde(rename = "ByteFallback")]
     ByteFallback,
     #[serde(rename = "Fuse")]
@@ -115,7 +118,9 @@ impl DecoderWrapper {
     }
 
     pub fn build(cfg: &DecoderConfig) -> Result<Self> {
-        Ok(Self { cfg: Some(cfg.clone()) })
+        Ok(Self {
+            cfg: Some(cfg.clone()),
+        })
     }
 
     /// 常用组合：`ByteLevel` 预分词 + `ByteLevel` 解码（GPT-2 家族）。
@@ -147,8 +152,17 @@ impl DecoderWrapper {
     }
 
     /// `ids → 文本`，跳过特殊 token（`skip_special_tokens = true` 语义）。
-    pub fn decode_ids_skip_special(&self, ids: &[u32], vocab: &Vocabulary, specials: &[u32]) -> Result<String> {
-        let kept: Vec<u32> = ids.iter().copied().filter(|i| !specials.contains(i)).collect();
+    pub fn decode_ids_skip_special(
+        &self,
+        ids: &[u32],
+        vocab: &Vocabulary,
+        specials: &[u32],
+    ) -> Result<String> {
+        let kept: Vec<u32> = ids
+            .iter()
+            .copied()
+            .filter(|i| !specials.contains(i))
+            .collect();
         self.decode_ids(&kept, vocab)
     }
 }
@@ -167,38 +181,71 @@ impl Decoder for DecoderWrapper {
                 Ok(vec![String::from_utf8_lossy(&bytes).into_owned()])
             }
             Some(DecoderConfig::WordPiece { prefix, cleanup }) => {
+                // HF 语义：`##` 开头的是词内续接片段（剥离前缀直接拼接），其余 token
+                // 之间用空格分隔；首 token 不加前导空格。cleanup 再把紧贴的标点/缩写收紧。
                 let mut out: Vec<String> = tokens
                     .into_iter()
-                    .map(|t| match t.strip_prefix(prefix.as_str()) {
+                    .enumerate()
+                    .map(|(i, t)| match t.strip_prefix(prefix.as_str()) {
                         Some(rest) => rest.to_string(),
-                        None => t,
+                        None if i == 0 => t,
+                        None => format!(" {}", t),
                     })
                     .collect();
-                if out.is_empty() {
-                    return Ok(out);
-                }
                 if *cleanup {
-                    // HF：把段首的空格并入前一段（"##" 前缀反解后合并词内片段）
-                    let mut merged: Vec<String> = Vec::with_capacity(out.len());
-                    for t in out.drain(..) {
-                        match merged.last_mut() {
-                            Some(prev) if !prev.is_empty() && !t.starts_with(' ') => prev.push_str(&t),
-                            _ => merged.push(t),
+                    for t in out.iter_mut() {
+                        for (from, to) in [
+                            (" .", "."),
+                            (" ?", "?"),
+                            (" !", "!"),
+                            (" ,", ","),
+                            (" n't", "n't"),
+                            (" 'm", "'m"),
+                            (" 's", "'s"),
+                            (" 're", "'re"),
+                            (" 've", "'ve"),
+                        ] {
+                            if t.contains(from) {
+                                *t = t.replace(from, to);
+                            }
                         }
                     }
-                    out = merged;
                 }
                 Ok(out)
             }
-            Some(DecoderConfig::Metaspace { replacement, .. }) => Ok(tokens
-                .into_iter()
-                .map(|t| t.replace(replacement.as_str(), " "))
-                .collect()),
+            Some(DecoderConfig::Metaspace {
+                replacement,
+                prepend_scheme,
+                ..
+            }) => {
+                // HF 语义：prepend_scheme 非 "never" 时，第 0 个 token 里的 replacement
+                // 全部删除（句首的 "▁" 只是标记，不是空格）；其余 token 还原为空格。
+                let skip_first = prepend_scheme != "never";
+                Ok(tokens
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, t)| {
+                        if i == 0 && skip_first {
+                            t.replace(replacement.as_str(), "")
+                        } else {
+                            t.replace(replacement.as_str(), " ")
+                        }
+                    })
+                    .collect())
+            }
             Some(DecoderConfig::BPEDecoder { suffix }) => Ok(tokens
                 .into_iter()
-                .map(|t| t.strip_suffix(suffix.as_str()).map(|s| s.to_string()).unwrap_or(t))
+                .map(|t| {
+                    t.strip_suffix(suffix.as_str())
+                        .map(|s| s.to_string())
+                        .unwrap_or(t)
+                })
                 .collect()),
-            Some(DecoderConfig::CTC { pad_token, word_delimiter_token, cleanup }) => {
+            Some(DecoderConfig::CTC {
+                pad_token,
+                word_delimiter_token,
+                cleanup,
+            }) => {
                 let mut out = Vec::new();
                 for t in tokens {
                     if *cleanup && &t == pad_token {
@@ -214,7 +261,10 @@ impl Decoder for DecoderWrapper {
             }
             Some(DecoderConfig::Replace { pattern, content }) => {
                 let re = compile(pattern)?;
-                Ok(tokens.into_iter().map(|t| re.replace_all(&t, content.as_str()).into_owned()).collect())
+                Ok(tokens
+                    .into_iter()
+                    .map(|t| re.replace_all(&t, content.as_str()).into_owned())
+                    .collect())
             }
             Some(DecoderConfig::ByteFallback) => {
                 let mut out = Vec::with_capacity(tokens.len());
@@ -249,7 +299,11 @@ impl Decoder for DecoderWrapper {
                 }
                 Ok(cur)
             }
-            Some(DecoderConfig::Strip { content, start, stop }) => Ok(tokens
+            Some(DecoderConfig::Strip {
+                content,
+                start,
+                stop,
+            }) => Ok(tokens
                 .into_iter()
                 .map(|mut t| {
                     if *start > 0 && t.starts_with(content) {
@@ -290,8 +344,13 @@ impl Decoder for DecoderWrapper {
 }
 
 fn compile(pattern: &PatternSpec) -> Result<regex::Regex> {
-    regex::Regex::new(pattern.as_str())
-        .map_err(|e| TokenizerError::Regex(format!("解码器 Replace 正则非法: {} ({})", pattern.as_str(), e)))
+    regex::Regex::new(pattern.as_str()).map_err(|e| {
+        TokenizerError::Regex(format!(
+            "解码器 Replace 正则非法: {} ({})",
+            pattern.as_str(),
+            e
+        ))
+    })
 }
 
 #[cfg(test)]
@@ -301,7 +360,14 @@ mod tests {
 
     fn vocab() -> Vocabulary {
         let mut v = Vocabulary::new();
-        for (t, id) in [("H", 0u32), ("i", 1), ("Ġ", 2), ("there", 3), ("##ing", 4), ("go", 5)] {
+        for (t, id) in [
+            ("H", 0u32),
+            ("i", 1),
+            ("Ġ", 2),
+            ("there", 3),
+            ("##ing", 4),
+            ("go", 5),
+        ] {
             v.insert(t, id).unwrap();
         }
         v
@@ -317,9 +383,66 @@ mod tests {
 
     #[test]
     fn wordpiece_strips_prefix_and_merges() {
-        let d = DecoderWrapper::build(&DecoderConfig::WordPiece { prefix: "##".into(), cleanup: true }).unwrap();
+        let d = DecoderWrapper::build(&DecoderConfig::WordPiece {
+            prefix: "##".into(),
+            cleanup: true,
+        })
+        .unwrap();
         let chain = d.decode_chain(vec!["go".into(), "##ing".into()]).unwrap();
         assert_eq!(chain.concat(), "going");
+    }
+
+    #[test]
+    fn wordpiece_matches_hf_spacing_and_cleanup() {
+        let d = DecoderWrapper::build(&DecoderConfig::WordPiece {
+            prefix: "##".into(),
+            cleanup: true,
+        })
+        .unwrap();
+        // HF（tokenizers 0.23）实测：非 `##` token 之间插空格，首个 token 无前导空格
+        assert_eq!(
+            d.decode_chain(vec!["hello".into(), "world".into()])
+                .unwrap()
+                .concat(),
+            "hello world"
+        );
+        assert_eq!(
+            d.decode_chain(vec!["[UNK]".into(), "hello".into()])
+                .unwrap()
+                .concat(),
+            "[UNK] hello"
+        );
+        // cleanup=true 收紧紧贴标点与常见缩写，但不动 ";"/":"/首尾括号
+        assert_eq!(
+            d.decode_chain(vec!["hello".into(), ",".into()])
+                .unwrap()
+                .concat(),
+            "hello,"
+        );
+        assert_eq!(
+            d.decode_chain(vec!["a".into(), "n't".into()])
+                .unwrap()
+                .concat(),
+            "an't"
+        );
+        assert_eq!(
+            d.decode_chain(vec!["(".into(), "hello".into(), ")".into()])
+                .unwrap()
+                .concat(),
+            "( hello )"
+        );
+        // cleanup=false 保留空格
+        let raw = DecoderWrapper::build(&DecoderConfig::WordPiece {
+            prefix: "##".into(),
+            cleanup: false,
+        })
+        .unwrap();
+        assert_eq!(
+            raw.decode_chain(vec!["hello".into(), ",".into()])
+                .unwrap()
+                .concat(),
+            "hello ,"
+        );
     }
 
     #[test]
@@ -330,15 +453,33 @@ mod tests {
             split: true,
         })
         .unwrap();
-        let chain = d.decode_chain(vec!["\u{2581}Hello".into(), "\u{2581}world".into()]).unwrap();
-        assert_eq!(chain.concat(), " Hello world");
+        // HF (tokenizers 0.23) 实测：prepend_scheme=always 时首个 token 的 ▁ 直接删除，
+        // ["▁Hello", "▁world"] -> "Hello world"（句首 ▁ 只是标记，不是空格）。
+        let chain = d
+            .decode_chain(vec!["\u{2581}Hello".into(), "\u{2581}world".into()])
+            .unwrap();
+        assert_eq!(chain.concat(), "Hello world");
+
+        // prepend_scheme=never 时首 token 的 ▁ 还原为空格 -> " Hello world"
+        let d_never = DecoderWrapper::build(&DecoderConfig::Metaspace {
+            replacement: "\u{2581}".into(),
+            prepend_scheme: "never".into(),
+            split: true,
+        })
+        .unwrap();
+        let chain_never = d_never
+            .decode_chain(vec!["\u{2581}Hello".into(), "\u{2581}world".into()])
+            .unwrap();
+        assert_eq!(chain_never.concat(), " Hello world");
     }
 
     #[test]
     fn byte_fallback_rebuilds_utf8() {
         let d = DecoderWrapper::build(&DecoderConfig::ByteFallback).unwrap();
         // "中" = E4 B8 AD
-        let chain = d.decode_chain(vec!["<0xE4>".into(), "<0xB8>".into(), "<0xAD>".into()]).unwrap();
+        let chain = d
+            .decode_chain(vec!["<0xE4>".into(), "<0xB8>".into(), "<0xAD>".into()])
+            .unwrap();
         assert_eq!(chain.concat(), "中");
     }
 
@@ -353,13 +494,23 @@ mod tests {
             cleanup: true,
         };
         let w = DecoderWrapper::build(&cfg).unwrap();
-        assert_eq!(serde_json::from_value::<DecoderConfig>(w.to_config_json().unwrap()).unwrap(), cfg);
+        assert_eq!(
+            serde_json::from_value::<DecoderConfig>(w.to_config_json().unwrap()).unwrap(),
+            cfg
+        );
     }
 
     #[test]
     fn strip_removes_suffix() {
-        let d = DecoderWrapper::build(&DecoderConfig::Strip { content: "</w>".into(), start: 0, stop: 1 }).unwrap();
-        let chain = d.decode_chain(vec!["low</w>".into(), "est".into()]).unwrap();
+        let d = DecoderWrapper::build(&DecoderConfig::Strip {
+            content: "</w>".into(),
+            start: 0,
+            stop: 1,
+        })
+        .unwrap();
+        let chain = d
+            .decode_chain(vec!["low</w>".into(), "est".into()])
+            .unwrap();
         assert_eq!(chain, vec!["low".to_string(), "est".to_string()]);
     }
 }

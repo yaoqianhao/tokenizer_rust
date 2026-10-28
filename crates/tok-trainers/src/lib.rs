@@ -10,7 +10,7 @@ pub mod corpus;
 pub mod driver;
 
 pub use corpus::{CorpusData, CorpusReader};
-pub use driver::{TrainOptions, prepare_words, train_model};
+pub use driver::{prepare_words, train_model, TrainOptions};
 
 use serde::{Deserialize, Serialize};
 

@@ -74,11 +74,17 @@ impl TokenRoles {
             if roles.unk_token.is_none() && (lower.contains("unk") || c == "<unk>") {
                 roles.unk_token = Some(c.to_string());
             } else if roles.bos_token.is_none()
-                && (c == "<s>" || lower.contains("bos") || lower.contains("startoftext") || lower.contains("start_of_text"))
+                && (c == "<s>"
+                    || lower.contains("bos")
+                    || lower.contains("startoftext")
+                    || lower.contains("start_of_text"))
             {
                 roles.bos_token = Some(c.to_string());
             } else if roles.eos_token.is_none()
-                && (c == "</s>" || lower.contains("eos") || lower.contains("endoftext") || lower.contains("end_of_text"))
+                && (c == "</s>"
+                    || lower.contains("eos")
+                    || lower.contains("endoftext")
+                    || lower.contains("end_of_text"))
             {
                 roles.eos_token = Some(c.to_string());
             } else if roles.pad_token.is_none() && (lower.contains("pad") || c == "<pad>") {
@@ -221,7 +227,10 @@ pub fn tokenizer_config(
 pub fn added_tokens_decoder(added: &[(AddedToken, u32)]) -> Value {
     let mut map = serde_json::Map::new();
     for (t, id) in added {
-        map.insert(id.to_string(), serde_json::to_value(t).unwrap_or(Value::Null));
+        map.insert(
+            id.to_string(),
+            serde_json::to_value(t).unwrap_or(Value::Null),
+        );
     }
     Value::Object(map)
 }
@@ -242,12 +251,19 @@ pub fn write_json(path: &Path, value: &Value) -> Result<(PathBuf, usize)> {
 pub fn validate_tokenizer_json(value: &Value) -> Result<()> {
     for key in ["version", "model", "added_tokens"] {
         if value.get(key).is_none() {
-            return Err(TokenizerError::config(format!("tokenizer.json 缺少必需字段 `{}`", key)));
+            return Err(TokenizerError::config(format!(
+                "tokenizer.json 缺少必需字段 `{}`",
+                key
+            )));
         }
     }
-    let model = value.get("model").ok_or_else(|| TokenizerError::config("tokenizer.json 缺少 model 节"))?;
+    let model = value
+        .get("model")
+        .ok_or_else(|| TokenizerError::config("tokenizer.json 缺少 model 节"))?;
     let ty = model.get("type").and_then(|v| v.as_str()).ok_or_else(|| {
-        TokenizerError::config("tokenizer.json 的 model 节缺少 `type`（HF 要求 BPE/WordPiece/WordLevel/Unigram）")
+        TokenizerError::config(
+            "tokenizer.json 的 model 节缺少 `type`（HF 要求 BPE/WordPiece/WordLevel/Unigram）",
+        )
     })?;
     // `merges` 形状校验与模型类型**无关**：只要该字段出现就必须是合法形状，
     // 否则（如 WordPiece 里塞了残缺 merges）会被静默带过。
@@ -257,7 +273,10 @@ pub fn validate_tokenizer_json(value: &Value) -> Result<()> {
             .and_then(|m| m.as_array())
             .ok_or_else(|| TokenizerError::config("`merges` 必须为数组"))?;
         for m in merges {
-            let ok = m.as_array().map(|p| p.len() == 2 && p.iter().all(|x| x.is_string())).unwrap_or(false)
+            let ok = m
+                .as_array()
+                .map(|p| p.len() == 2 && p.iter().all(|x| x.is_string()))
+                .unwrap_or(false)
                 || m.is_string();
             if !ok {
                 return Err(TokenizerError::config(
@@ -269,7 +288,9 @@ pub fn validate_tokenizer_json(value: &Value) -> Result<()> {
     match ty {
         "BPE" => {
             if model.get("vocab").is_none() || model.get("merges").is_none() {
-                return Err(TokenizerError::config("BPE 模型必须同时含 `vocab` 与 `merges`"));
+                return Err(TokenizerError::config(
+                    "BPE 模型必须同时含 `vocab` 与 `merges`",
+                ));
             }
         }
         "WordPiece" | "WordLevel" => {
@@ -278,13 +299,23 @@ pub fn validate_tokenizer_json(value: &Value) -> Result<()> {
             }
         }
         "Unigram" => {
-            let vocab = model.get("vocab").and_then(|v| v.as_array()).ok_or_else(|| {
-                TokenizerError::config("Unigram 的 `vocab` 必须为 [[piece, score], ...] 数组")
-            })?;
-            for e in vocab {
-                let ok = e.as_array().map(|p| p.len() == 2 && p[0].is_string() && p[1].is_number()).unwrap_or(false);
+            let vocab = model
+                .get("vocab")
+                .and_then(|v| v.as_array())
+                .ok_or_else(|| {
+                    TokenizerError::config("Unigram 的 `vocab` 必须为 [[piece, score], ...] 数组")
+                })?;
+            for (i, e) in vocab.iter().enumerate() {
+                let ok = e
+                    .as_array()
+                    .map(|p| p.len() == 2 && p[0].is_string() && p[1].is_number())
+                    .unwrap_or(false);
                 if !ok {
-                    return Err(TokenizerError::config("Unigram vocab 元素必须为 [piece, score]"));
+                    // 带上位置与内容：非有限 f64 经 serde_json 会变成 null，是最常见诱因
+                    return Err(TokenizerError::config(format!(
+                        "Unigram vocab 元素必须为 [piece, score]，第 {i} 项 = {}",
+                        e
+                    )));
                 }
             }
         }

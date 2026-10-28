@@ -15,9 +15,12 @@ pub mod wordpiece;
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use tok_core::{Model, Result, Token, TokenizerError, Trainer, TrainerArtifact, TrainerParams, Vocabulary, layer};
+use tok_core::{
+    layer, Model, Result, Token, TokenizerError, Trainer, TrainerArtifact, TrainerParams,
+    Vocabulary,
+};
 
-pub use bpe::{BpeModel, BpeTrainer, MergeSpec, Symbol, bpe_from_artifact, encode_words};
+pub use bpe::{bpe_from_artifact, encode_words, BpeModel, BpeTrainer, MergeSpec, Symbol};
 pub use unigram::{UnigramModel, UnigramTrainer};
 pub use wordlevel::{WordLevelModel, WordLevelTrainer};
 pub use wordpiece::{WordPieceLegacyConfig, WordPieceModel, WordPieceTrainer};
@@ -200,7 +203,12 @@ impl ModelWrapper {
                 m.ignore_merges = *ignore_merges;
                 ModelWrapper::Bpe(m)
             }
-            ModelConfig::WordPiece { unk_token, continuing_subword_prefix, max_input_chars_per_word, vocab } => {
+            ModelConfig::WordPiece {
+                unk_token,
+                continuing_subword_prefix,
+                max_input_chars_per_word,
+                vocab,
+            } => {
                 let mut v = Vocabulary::new();
                 for (t, id) in vocab {
                     v.insert(t, *id)?;
@@ -217,8 +225,19 @@ impl ModelWrapper {
                 }
                 ModelWrapper::WordLevel(WordLevelModel::new(v, unk_token.clone()))
             }
-            ModelConfig::Unigram { vocab, .. } => {
-                ModelWrapper::Unigram(UnigramModel::from_pieces(vocab.clone(), "<unk>")?)
+            ModelConfig::Unigram {
+                unk_id,
+                byte_fallback,
+                vocab,
+            } => {
+                let m = match unk_id {
+                    Some(id) => {
+                        UnigramModel::from_pieces(vocab.clone(), Some(*id), *byte_fallback)?
+                    }
+                    // 旧配置 / HF 里 unk 只以文本出现时，按 `<unk>` 文本回退
+                    None => UnigramModel::with_unk_text(vocab.clone(), "<unk>", *byte_fallback)?,
+                };
+                ModelWrapper::Unigram(m)
             }
         })
     }
@@ -305,12 +324,20 @@ impl Model for ModelWrapper {
     fn apply_artifact(&mut self, artifact: &TrainerArtifact) -> Result<()> {
         match (self, artifact) {
             (ModelWrapper::Bpe(m), a @ TrainerArtifact::Bpe { .. }) => m.apply_artifact(a),
-            (ModelWrapper::WordPiece(m), a @ TrainerArtifact::WordPiece { .. }) => m.apply_artifact(a),
-            (ModelWrapper::WordLevel(m), a @ TrainerArtifact::WordLevel { .. }) => m.apply_artifact(a),
+            (ModelWrapper::WordPiece(m), a @ TrainerArtifact::WordPiece { .. }) => {
+                m.apply_artifact(a)
+            }
+            (ModelWrapper::WordLevel(m), a @ TrainerArtifact::WordLevel { .. }) => {
+                m.apply_artifact(a)
+            }
             (ModelWrapper::Unigram(m), a @ TrainerArtifact::Unigram { .. }) => m.apply_artifact(a),
             (w, a) => Err(TokenizerError::layer(
                 layer::MODEL,
-                format!("模型类型 {} 与产物类型 {} 不匹配", w.type_name(), artifact_kind(a)),
+                format!(
+                    "模型类型 {} 与产物类型 {} 不匹配",
+                    w.type_name(),
+                    artifact_kind(a)
+                ),
             )),
         }
     }
@@ -353,7 +380,10 @@ mod tests {
         }
         byte_level_bpe_config(
             vocab,
-            vec![MergeSpec::Pair(vec!["a".into(), "b".into()]), MergeSpec::Text("b a".into())],
+            vec![
+                MergeSpec::Pair(vec!["a".into(), "b".into()]),
+                MergeSpec::Text("b a".into()),
+            ],
         )
     }
 
@@ -389,7 +419,9 @@ mod tests {
     #[test]
     fn dispatch_apply_artifact() {
         let mut w = ModelWrapper::build(&tiny_bpe()).unwrap();
-        let art = TrainerArtifact::WordPiece { vocab: vec![("x".into(), 0)] };
+        let art = TrainerArtifact::WordPiece {
+            vocab: vec![("x".into(), 0)],
+        };
         assert!(w.apply_artifact(&art).is_err());
         let ok = TrainerArtifact::Bpe {
             vocab: vec![("a".into(), 0), ("b".into(), 1)],
@@ -397,7 +429,8 @@ mod tests {
         };
         w.apply_artifact(&ok).unwrap();
         assert_eq!(w.get_vocab().len(), 2);
-        w.push_special_to_vocab(AddedToken::new("<unk>", true), 2).unwrap();
+        w.push_special_to_vocab(AddedToken::new("<unk>", true), 2)
+            .unwrap();
         assert_eq!(w.get_vocab().token_to_id("<unk>"), Some(2));
     }
 }

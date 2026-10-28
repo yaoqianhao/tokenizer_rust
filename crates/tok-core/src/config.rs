@@ -66,20 +66,20 @@ pub struct TruncationParams {
 
 impl Default for TruncationParams {
     fn default() -> Self {
-        Self { max_length: 512, strategy: TruncationStrategy::LongestFirst, stride: 0, direction: TruncationDirection::Right }
+        Self {
+            max_length: 512,
+            strategy: TruncationStrategy::LongestFirst,
+            stride: 0,
+            direction: TruncationDirection::Right,
+        }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum PaddingStrategy {
+    #[default]
     BatchLongest,
     Fixed(usize),
-}
-
-impl Default for PaddingStrategy {
-    fn default() -> Self {
-        PaddingStrategy::BatchLongest
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -120,7 +120,9 @@ pub struct RegexSpec {
 
 impl PatternSpec {
     pub fn new(regex: impl Into<String>) -> Self {
-        PatternSpec::Tagged(RegexSpec { regex: regex.into() })
+        PatternSpec::Tagged(RegexSpec {
+            regex: regex.into(),
+        })
     }
     pub fn as_str(&self) -> &str {
         match self {
@@ -158,7 +160,14 @@ fn default_true() -> bool {
 
 impl AddedToken {
     pub fn new(content: impl Into<String>, special: bool) -> Self {
-        Self { content: content.into(), single_word: false, lstrip: false, rstrip: false, normalized: false, special }
+        Self {
+            content: content.into(),
+            single_word: false,
+            lstrip: false,
+            rstrip: false,
+            normalized: false,
+            special,
+        }
     }
     pub fn with_flags(mut self, single_word: bool, lstrip: bool, rstrip: bool) -> Self {
         self.single_word = single_word;
@@ -228,15 +237,27 @@ pub struct TrainerParams {
     pub end_of_word_suffix: Option<String>,
     #[serde(default)]
     pub limit_alphabet: Option<usize>,
-    /// 是否生成 256 个字节级 token `<0x00>..<0xFF>`（字节级 BPE）
+    /// 是否生成 256 个字节级 token `<0x00>..<0xFF>`（字节级 BPE / Unigram byte-fallback）
     #[serde(default)]
     pub byte_fallback: bool,
+    /// Unigram：候选 piece 的最大字符数（SentencePiece `max_piece_length`，默认 16）
+    #[serde(default)]
+    pub max_piece_length: Option<usize>,
+    /// Unigram：每轮剪枝保留比例（SentencePiece `shrinking_factor`，默认 0.75）
+    #[serde(default)]
+    pub shrinking_factor: Option<f64>,
+    /// Unigram：每个剪枝阶段内部的 EM 迭代次数（默认 2）
+    #[serde(default)]
+    pub n_sub_iterations: Option<usize>,
 }
 
 impl TrainerParams {
     /// 常用构造：给定词表规模
     pub fn of(vocab_size: usize) -> Self {
-        Self { vocab_size, ..Default::default() }
+        Self {
+            vocab_size,
+            ..Default::default()
+        }
     }
 }
 
@@ -256,6 +277,9 @@ impl Default for TrainerParams {
             end_of_word_suffix: None,
             limit_alphabet: None,
             byte_fallback: false,
+            max_piece_length: None,
+            shrinking_factor: None,
+            n_sub_iterations: None,
         }
     }
 }
@@ -264,8 +288,17 @@ impl Default for TrainerParams {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum TrainerArtifact {
-    WordLevel { vocab: Vec<(String, u32)> },
-    Bpe { vocab: Vec<(String, u32)>, merges: Vec<(String, String)> },
-    WordPiece { vocab: Vec<(String, u32)> },
-    Unigram { vocab: Vec<(String, f64)> },
+    WordLevel {
+        vocab: Vec<(String, u32)>,
+    },
+    Bpe {
+        vocab: Vec<(String, u32)>,
+        merges: Vec<(String, String)>,
+    },
+    WordPiece {
+        vocab: Vec<(String, u32)>,
+    },
+    Unigram {
+        vocab: Vec<(String, f64)>,
+    },
 }

@@ -28,7 +28,10 @@ pub enum NormalizerConfig {
     #[serde(rename = "Strip")]
     Strip,
     #[serde(rename = "Replace")]
-    Replace { pattern: PatternSpec, content: String },
+    Replace {
+        pattern: PatternSpec,
+        content: String,
+    },
     #[serde(rename = "Prepend")]
     Prepend { prepend: String },
     #[serde(rename = "Sequence")]
@@ -54,7 +57,11 @@ pub enum NormalizerWrapper {
 
 impl std::fmt::Debug for NormalizerWrapper {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "NormalizerWrapper({})", <Self as tok_core::Normalizer>::name(self))
+        write!(
+            f,
+            "NormalizerWrapper({})",
+            <Self as tok_core::Normalizer>::name(self)
+        )
     }
 }
 
@@ -158,7 +165,9 @@ impl tok_core::Normalizer for NormalizerWrapper {
                 "pattern": {"Regex": re.as_str()},
                 "content": content,
             })),
-            NormalizerWrapper::Prepend(s) => Ok(serde_json::json!({"type": "Prepend", "prepend": s})),
+            NormalizerWrapper::Prepend(s) => {
+                Ok(serde_json::json!({"type": "Prepend", "prepend": s}))
+            }
             NormalizerWrapper::Sequence(list) => {
                 let mut items = Vec::with_capacity(list.len());
                 for n in list {
@@ -202,7 +211,7 @@ mod tests {
             normalizers: vec![NormalizerConfig::Lowercase, NormalizerConfig::StripAccents],
         };
         let n = NormalizerWrapper::build(&cfg).unwrap();
-        let out = n.normalize(NormalizedString::from_str("CAFÉ"));
+        let out = n.normalize(NormalizedString::new("CAFÉ"));
         assert_eq!(out.normalized(), "cafe");
         let o = out.convert_offsets((0, 4)).unwrap();
         assert_eq!((o.start, o.end), (0, 5));
@@ -211,7 +220,7 @@ mod tests {
     #[test]
     fn nfkc_folds_fullwidth_and_flags_degraded() {
         let n = NormalizerWrapper::build(&NormalizerConfig::Nfkc).unwrap();
-        let out = n.normalize(NormalizedString::from_str("ＡＢ"));
+        let out = n.normalize(NormalizedString::new("ＡＢ"));
         assert_eq!(out.normalized(), "AB");
         assert!(out.is_degraded(), "字符数变化必须显式标记退化");
     }
@@ -223,14 +232,17 @@ mod tests {
             content: "_".to_string(),
         };
         let n = NormalizerWrapper::build(&cfg).unwrap();
-        let out = n.normalize(NormalizedString::from_str("a   b"));
+        let out = n.normalize(NormalizedString::new("a   b"));
         assert_eq!(out.normalized(), "a_b");
     }
 
     #[test]
     fn prepend_maps_to_original_start() {
-        let n = NormalizerWrapper::build(&NormalizerConfig::Prepend { prepend: "\u{2581}".into() }).unwrap();
-        let out = n.normalize(NormalizedString::from_str("hello"));
+        let n = NormalizerWrapper::build(&NormalizerConfig::Prepend {
+            prepend: "\u{2581}".into(),
+        })
+        .unwrap();
+        let out = n.normalize(NormalizedString::new("hello"));
         assert_eq!(out.normalized(), "\u{2581}hello");
         let o = out.convert_offsets((3, 8)).unwrap();
         assert_eq!((o.start, o.end), (0, 5));
@@ -238,7 +250,10 @@ mod tests {
 
     #[test]
     fn config_json_matches_hf_shape() {
-        let cfg = NormalizerConfig::Replace { pattern: PatternSpec::new("x"), content: "y".into() };
+        let cfg = NormalizerConfig::Replace {
+            pattern: PatternSpec::new("x"),
+            content: "y".into(),
+        };
         let n = NormalizerWrapper::build(&cfg).unwrap();
         let v = n.to_config_json().unwrap();
         assert_eq!(v["type"], "Replace");

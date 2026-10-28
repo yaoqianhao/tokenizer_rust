@@ -59,10 +59,15 @@ pub struct NormalizedString {
 }
 
 impl NormalizedString {
-    pub fn from_str(s: &str) -> Self {
+    pub fn new(s: &str) -> Self {
         let mut alignments = Vec::new();
         for (s0, e0) in char_spans(s) {
-            alignments.push(Alignment { n_start: s0, n_end: e0, o_start: s0, o_end: e0 });
+            alignments.push(Alignment {
+                n_start: s0,
+                n_end: e0,
+                o_start: s0,
+                o_end: e0,
+            });
         }
         Self {
             original: s.to_string(),
@@ -149,7 +154,12 @@ impl NormalizedString {
                     continue;
                 }
             }
-            alignments.push(Alignment { n_start: ns, n_end: ne, o_start: os, o_end: oe });
+            alignments.push(Alignment {
+                n_start: ns,
+                n_end: ne,
+                o_start: os,
+                o_end: oe,
+            });
         }
         let changed_arity = old_keys.len() != new_keys.len();
         let changed_len = old.len() != self.normalized.len();
@@ -173,7 +183,12 @@ impl NormalizedString {
                 }
                 let n_start = out.len();
                 out.push_str(&new);
-                alignments.push(Alignment { n_start, n_end: out.len(), o_start: a.o_start, o_end: a.o_end });
+                alignments.push(Alignment {
+                    n_start,
+                    n_end: out.len(),
+                    o_start: a.o_start,
+                    o_end: a.o_end,
+                });
             }
         }
         if out.chars().count() != self.normalized.chars().count() {
@@ -258,6 +273,42 @@ impl NormalizedString {
         self.realign(replaced);
     }
 
+    /// 前置拼接并把插入片段的 original 区间吸到紧随其后的首个字符上。
+    ///
+    /// 用于 Metaspace 的 `▁` 前缀：HF 对句首插入的 `▁` 不给独立空区间，
+    /// 而是与首个字符共享同一 original 区间（`"hello"` → token `▁hello` offset `(0,5)`）。
+    pub fn prepend_absorbing_next(&mut self, s: &str) {
+        if s.is_empty() {
+            return;
+        }
+        let (o_start, o_end) = self
+            .alignments
+            .first()
+            .map(|a| (a.o_start, a.o_end))
+            .unwrap_or((0, 0));
+        let mut new_norm = String::with_capacity(self.normalized.len() + s.len());
+        new_norm.push_str(s);
+        new_norm.push_str(&self.normalized);
+        let mut alignments = Vec::with_capacity(self.alignments.len() + 1);
+        alignments.push(Alignment {
+            n_start: 0,
+            n_end: s.len(),
+            o_start,
+            o_end,
+        });
+        for a in &self.alignments {
+            alignments.push(Alignment {
+                n_start: a.n_start + s.len(),
+                n_end: a.n_end + s.len(),
+                o_start: a.o_start,
+                o_end: a.o_end,
+            });
+        }
+        self.normalized = new_norm;
+        self.alignments = alignments;
+        self.splits = None;
+    }
+
     /// 前置拼接（对应 HF `Prepend`，如 Metaspace 的 `▁`）。
     pub fn prepend(&mut self, s: &str) {
         if s.is_empty() {
@@ -266,7 +317,12 @@ impl NormalizedString {
         let mut new_norm = String::with_capacity(self.normalized.len() + s.len());
         new_norm.push_str(s);
         new_norm.push_str(&self.normalized);
-        let mut alignments = vec![Alignment { n_start: 0, n_end: s.len(), o_start: 0, o_end: 0 }];
+        let mut alignments = vec![Alignment {
+            n_start: 0,
+            n_end: s.len(),
+            o_start: 0,
+            o_end: 0,
+        }];
         for a in &self.alignments {
             alignments.push(Alignment {
                 n_start: a.n_start + s.len(),
@@ -341,8 +397,7 @@ impl NormalizedString {
         let mut alignments = Vec::new();
         for a in &self.alignments {
             let seg = self.normalized[a.n_start..a.n_end].to_string();
-            let mut byte_cursor = a.o_start;
-            for b in seg.bytes() {
+            for (byte_cursor, b) in (a.o_start..).zip(seg.bytes()) {
                 let n_start = out.len();
                 out.push(crate::byte_level::byte_to_char(b));
                 alignments.push(Alignment {
@@ -351,7 +406,6 @@ impl NormalizedString {
                     o_start: byte_cursor,
                     o_end: byte_cursor + 1,
                 });
-                byte_cursor += 1;
             }
         }
         self.normalized = out;
@@ -409,9 +463,10 @@ impl NormalizedString {
                         o_end = o_end.max(a.o_end);
                     }
                 }
-                let mut byte_cursor = o_start.unwrap_or(abs_start);
                 let piece_start = out.len();
-                for b in self.normalized[abs_start..abs_end].bytes() {
+                for (byte_cursor, b) in (o_start.unwrap_or(abs_start)..)
+                    .zip(self.normalized[abs_start..abs_end].bytes())
+                {
                     let n_start = out.len();
                     out.push(crate::byte_level::byte_to_char(b));
                     alignments.push(Alignment {
@@ -420,7 +475,6 @@ impl NormalizedString {
                         o_start: byte_cursor,
                         o_end: byte_cursor + 1,
                     });
-                    byte_cursor += 1;
                 }
                 if out.len() > piece_start {
                     splits.push((piece_start, out.len()));
@@ -448,7 +502,11 @@ impl NormalizedString {
     }
 
     /// 用"分隔符区间"覆盖切分，按 behavior 决定分隔符去向。
-    pub fn split_by_delims(&mut self, delims: Vec<(usize, usize)>, behavior: SplitDelimiterBehavior) {
+    pub fn split_by_delims(
+        &mut self,
+        delims: Vec<(usize, usize)>,
+        behavior: SplitDelimiterBehavior,
+    ) {
         let segments = self.current_segments();
         let mut out = Vec::new();
         for (s, e) in segments {
@@ -463,14 +521,25 @@ impl NormalizedString {
     }
 
     /// 按正则切分。
-    pub fn split_regex(&mut self, re: &regex::Regex, behavior: SplitDelimiterBehavior) -> Result<()> {
-        let delims: Vec<(usize, usize)> = re.find_iter(&self.normalized).map(|m| (m.start(), m.end())).collect();
+    pub fn split_regex(
+        &mut self,
+        re: &regex::Regex,
+        behavior: SplitDelimiterBehavior,
+    ) -> Result<()> {
+        let delims: Vec<(usize, usize)> = re
+            .find_iter(&self.normalized)
+            .map(|m| (m.start(), m.end()))
+            .collect();
         self.split_by_delims(delims, behavior);
         Ok(())
     }
 
     /// 按谓词切分（连续满足谓词的字符视为一段分隔符）。
-    pub fn split_on_pred<F: Fn(char) -> bool>(&mut self, pred: F, behavior: SplitDelimiterBehavior) {
+    pub fn split_on_pred<F: Fn(char) -> bool>(
+        &mut self,
+        pred: F,
+        behavior: SplitDelimiterBehavior,
+    ) {
         let mut delims = Vec::new();
         let mut cur: Option<(usize, usize)> = None;
         // Isolated：每个匹配字符各自成为一段分隔符（HF 语义，BertPreTokenizer 依赖）；
@@ -541,7 +610,12 @@ impl NormalizedString {
                     Some(o) => (o.start, o.end),
                     None => (a, b),
                 };
-                PreToken { id: i, value, offsets, n_offsets: (a, b) }
+                PreToken {
+                    id: i,
+                    value,
+                    offsets,
+                    n_offsets: (a, b),
+                }
             })
             .collect()
     }
@@ -568,13 +642,13 @@ fn greedy_align<T: PartialEq>(old: &[T], new: &[T]) -> Vec<usize> {
             continue;
         }
         let hi = (i + 8).min(old.len());
-        let mut found: Option<usize> = None;
-        for k in i..hi {
-            if &old[k] == c {
-                found = Some(k);
-                break;
-            }
-        }
+        let found: Option<usize> = old
+            .iter()
+            .enumerate()
+            .take(hi)
+            .skip(i)
+            .find(|&(_, o)| o == c)
+            .map(|(k, _)| k);
         match found {
             Some(k) => {
                 res.push(k);
@@ -595,7 +669,11 @@ fn align_key(c: char) -> String {
     use unicode_normalization::UnicodeNormalization;
     let folded: String = c.to_string().nfkc().collect();
     let stripped: String = folded.nfd().filter(|x| !is_combining_mark(*x)).collect();
-    let base = if stripped.is_empty() { folded } else { stripped };
+    let base = if stripped.is_empty() {
+        folded
+    } else {
+        stripped
+    };
     if base.is_empty() {
         c.to_string()
     } else {
@@ -749,7 +827,8 @@ impl Encoding {
         self.attention_mask.extend(other.attention_mask);
         self.special_tokens_mask.extend(other.special_tokens_mask);
         for (k, (s, e)) in other.sequence_ranges.iter() {
-            self.sequence_ranges.insert(base_key + *k, (s + off, e + off));
+            self.sequence_ranges
+                .insert(base_key + *k, (s + off, e + off));
         }
         self.offsets_degraded |= other.offsets_degraded;
         self.overflowing.extend(other.overflowing);
@@ -838,7 +917,9 @@ impl Encoding {
             }
         }
         let final_keep: Vec<usize> = (0..len)
-            .filter(|i| self.special_tokens_mask.get(*i).copied().unwrap_or(0) == 1 || keep_set.contains(i))
+            .filter(|i| {
+                self.special_tokens_mask.get(*i).copied().unwrap_or(0) == 1 || keep_set.contains(i)
+            })
             .collect();
         let primary = self.subset(&final_keep);
         if params.stride == 0 {
@@ -938,7 +1019,7 @@ impl Encoding {
                     self.attention_mask.insert(0, 0);
                     self.special_tokens_mask.insert(0, 1);
                 }
-                for (_, v) in self.sequence_ranges.iter_mut() {
+                for v in self.sequence_ranges.values_mut() {
                     v.0 += n;
                     v.1 += n;
                 }
@@ -953,7 +1034,7 @@ mod tests {
 
     #[test]
     fn convert_offsets_maps_back() {
-        let ns = NormalizedString::from_str("Hello world");
+        let ns = NormalizedString::new("Hello world");
         let t = ns.normalized().find("world").unwrap();
         let o = ns.convert_offsets((t, t + 5)).unwrap();
         assert_eq!((o.start, o.end), (6, 11));
@@ -961,7 +1042,7 @@ mod tests {
 
     #[test]
     fn lowercase_keeps_alignment() {
-        let mut ns = NormalizedString::from_str("HeLLo");
+        let mut ns = NormalizedString::new("HeLLo");
         ns.lowercase();
         assert_eq!(ns.normalized(), "hello");
         let o = ns.convert_offsets((0, 5)).unwrap();
@@ -971,18 +1052,20 @@ mod tests {
 
     #[test]
     fn split_removed_and_isolated() {
-        let mut ns = NormalizedString::from_str("a b");
+        let mut ns = NormalizedString::new("a b");
         let re = regex::Regex::new(" ").unwrap();
-        ns.split_regex(&re, SplitDelimiterBehavior::Removed).unwrap();
+        ns.split_regex(&re, SplitDelimiterBehavior::Removed)
+            .unwrap();
         assert_eq!(ns.splits().unwrap(), &[(0, 1), (2, 3)]);
-        let mut ns2 = NormalizedString::from_str("a b");
-        ns2.split_regex(&re, SplitDelimiterBehavior::Isolated).unwrap();
+        let mut ns2 = NormalizedString::new("a b");
+        ns2.split_regex(&re, SplitDelimiterBehavior::Isolated)
+            .unwrap();
         assert_eq!(ns2.splits().unwrap(), &[(0, 1), (1, 2), (2, 3)]);
     }
 
     #[test]
     fn prepend_shifts_splits() {
-        let mut ns = NormalizedString::from_str("ab");
+        let mut ns = NormalizedString::new("ab");
         ns.prepend("\u{2581}");
         assert_eq!(ns.normalized(), "\u{2581}ab");
         // 前缀字符本身映射回原文起点（零宽区间）
@@ -1004,7 +1087,12 @@ mod tests {
             e.attention_mask.push(1);
             e.special_tokens_mask.push(0);
         }
-        let p = TruncationParams { max_length: 4, strategy: TruncationStrategy::LongestFirst, stride: 1, direction: Default::default() };
+        let p = TruncationParams {
+            max_length: 4,
+            strategy: TruncationStrategy::LongestFirst,
+            stride: 1,
+            direction: Default::default(),
+        };
         let chunks = e.truncate(&p);
         assert_eq!(chunks.len(), 3);
         assert_eq!(chunks[0].ids, vec![0, 1, 2, 3]);
@@ -1014,13 +1102,15 @@ mod tests {
 
     #[test]
     fn pad_left_updates_ranges() {
-        let mut e = Encoding::default();
-        e.ids = vec![1, 2];
-        e.type_ids = vec![0, 0];
-        e.tokens = vec!["a".into(), "b".into()];
-        e.offsets = vec![(0, 1), (1, 2)];
-        e.attention_mask = vec![1, 1];
-        e.special_tokens_mask = vec![0, 0];
+        let mut e = Encoding {
+            ids: vec![1, 2],
+            type_ids: vec![0, 0],
+            tokens: vec!["a".into(), "b".into()],
+            offsets: vec![(0, 1), (1, 2)],
+            attention_mask: vec![1, 1],
+            special_tokens_mask: vec![0, 0],
+            ..Default::default()
+        };
         e.sequence_ranges.insert(0, (0, 2));
         let p = PaddingParams {
             strategy: crate::config::PaddingStrategy::Fixed(4),

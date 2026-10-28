@@ -77,11 +77,17 @@ impl AddedVocabulary {
     }
 
     pub fn token_to_id(&self, content: &str) -> Option<u32> {
-        self.tokens.iter().find(|(t, _)| t.content == content).map(|(_, id)| *id)
+        self.tokens
+            .iter()
+            .find(|(t, _)| t.content == content)
+            .map(|(_, id)| *id)
     }
 
     pub fn with_ids(&self) -> Vec<AddedTokenWithId> {
-        self.tokens.iter().map(|(t, id)| AddedTokenWithId::from_token(t, *id)).collect()
+        self.tokens
+            .iter()
+            .map(|(t, id)| AddedTokenWithId::from_token(t, *id))
+            .collect()
     }
 
     /// S1：把输入切成 [正文, 后加token, 正文, ...]，保持字节下标连续。
@@ -91,10 +97,18 @@ impl AddedVocabulary {
     /// 与主流模型一致）；该差异已在 README "已知边界" 中登记。
     pub fn split(&self, text: &str) -> Vec<SplitUnit> {
         if self.tokens.is_empty() {
-            return vec![SplitUnit { text: text.to_string(), start: 0, end: text.len(), id: None }];
+            return vec![SplitUnit {
+                text: text.to_string(),
+                start: 0,
+                end: text.len(),
+                id: None,
+            }];
         }
-        let mut pats: Vec<(&str, u32, &AddedToken)> =
-            self.tokens.iter().map(|(t, id)| (t.content.as_str(), *id, t)).collect();
+        let mut pats: Vec<(&str, u32, &AddedToken)> = self
+            .tokens
+            .iter()
+            .map(|(t, id)| (t.content.as_str(), *id, t))
+            .collect();
         pats.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then(a.1.cmp(&b.1)));
 
         let bytes = text.as_bytes();
@@ -108,10 +122,18 @@ impl AddedVocabulary {
                 if bytes.len() >= i + cb.len() && &bytes[i..i + cb.len()] == cb {
                     if tok.single_word {
                         let prev_ok = i == 0
-                            || !text[..i].chars().next_back().map(is_word_char).unwrap_or(false);
+                            || !text[..i]
+                                .chars()
+                                .next_back()
+                                .map(is_word_char)
+                                .unwrap_or(false);
                         let next = i + cb.len();
                         let next_ok = next >= bytes.len()
-                            || !text[next..].chars().next().map(is_word_char).unwrap_or(false);
+                            || !text[next..]
+                                .chars()
+                                .next()
+                                .map(is_word_char)
+                                .unwrap_or(false);
                         if !(prev_ok && next_ok) {
                             continue;
                         }
@@ -145,9 +167,19 @@ impl AddedVocabulary {
                         }
                     }
                     if start > cursor {
-                        out.push(SplitUnit { text: text[cursor..start].to_string(), start: cursor, end: start, id: None });
+                        out.push(SplitUnit {
+                            text: text[cursor..start].to_string(),
+                            start: cursor,
+                            end: start,
+                            id: None,
+                        });
                     }
-                    out.push(SplitUnit { text: text[start..end].to_string(), start, end, id: Some(id) });
+                    out.push(SplitUnit {
+                        text: text[start..end].to_string(),
+                        start,
+                        end,
+                        id: Some(id),
+                    });
                     cursor = end;
                     i = end;
                 }
@@ -158,7 +190,12 @@ impl AddedVocabulary {
             }
         }
         if cursor < bytes.len() {
-            out.push(SplitUnit { text: text[cursor..].to_string(), start: cursor, end: bytes.len(), id: None });
+            out.push(SplitUnit {
+                text: text[cursor..].to_string(),
+                start: cursor,
+                end: bytes.len(),
+                id: None,
+            });
         }
         out
     }
@@ -235,7 +272,11 @@ impl Vocabulary {
     }
 
     pub fn max_id(&self) -> u32 {
-        self.id_to_token.iter().rposition(|v| v.is_some()).map(|i| i as u32).unwrap_or(0)
+        self.id_to_token
+            .iter()
+            .rposition(|v| v.is_some())
+            .map(|i| i as u32)
+            .unwrap_or(0)
     }
 
     pub fn added(&self) -> &AddedVocabulary {
@@ -281,7 +322,10 @@ impl Vocabulary {
 
     /// 供 HF 导出使用的 token→id 映射（BTreeMap 保证输出稳定）。
     pub fn to_id_map(&self) -> std::collections::BTreeMap<String, u32> {
-        self.token_to_id.iter().map(|(k, v)| (k.clone(), *v)).collect()
+        self.token_to_id
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect()
     }
 
     /// 按 ID 升序的 (token, id) 列表（训练产物 / merges 导出使用）。
@@ -311,7 +355,10 @@ impl Vocabulary {
         }
         for (tk, id) in self.added.tokens() {
             mix(&tk.content, &mut hash);
-            mix(&format!("@{}{}{}", id, tk.special, tk.normalized), &mut hash);
+            mix(
+                &format!("@{}{}{}", id, tk.special, tk.normalized),
+                &mut hash,
+            );
         }
         mix(
             &format!(
@@ -362,7 +409,10 @@ impl Vocabulary {
 
     /// 导出为普通 HashMap（调试/对比使用）。
     pub fn to_hash_map(&self) -> HashMap<String, u32> {
-        self.token_to_id.iter().map(|(k, v)| (k.clone(), *v)).collect()
+        self.token_to_id
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect()
     }
 }
 

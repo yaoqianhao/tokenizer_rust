@@ -9,17 +9,18 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use tok_core::{
-    AddedToken, AddedTokenWithId, Decoder, Encoding, Model, NormalizedString, Normalizer, PaddingParams,
-    PaddingStrategy, PostProcessor, PreTokenizer, Result, TokenizerError, TrainerParams, TruncationParams, layer,
+    layer, AddedToken, AddedTokenWithId, Decoder, Encoding, Model, NormalizedString, Normalizer,
+    PaddingParams, PaddingStrategy, PostProcessor, PreTokenizer, Result, TokenizerError,
+    TrainerParams, TruncationParams,
 };
 use tok_decoders::{DecoderConfig, DecoderWrapper};
 use tok_models::{ModelConfig, ModelWrapper};
 use tok_normalizers::{NormalizerConfig, NormalizerWrapper};
 use tok_post::{PostProcessorConfig, PostProcessorWrapper};
 use tok_pretok::{PreTokenizerConfig, PreTokenizerWrapper};
-use tok_trainers::{CorpusReader, TrainOptions, TrainerReport, train_model};
+use tok_trainers::{train_model, CorpusReader, TrainOptions, TrainerReport};
 
-use crate::hf::{self, HF_SCHEMA_VERSION, HfTokenizerJson, TokenRoles};
+use crate::hf::{self, HfTokenizerJson, TokenRoles, HF_SCHEMA_VERSION};
 
 fn default_max_len() -> usize {
     512
@@ -64,7 +65,11 @@ impl SavedFiles {
     pub fn names(&self) -> Vec<String> {
         self.files
             .iter()
-            .map(|(p, _)| p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default())
+            .map(|(p, _)| {
+                p.file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default()
+            })
             .collect()
     }
 
@@ -75,7 +80,9 @@ impl SavedFiles {
             .map(|(p, n)| {
                 format!(
                     "{}({} 行)",
-                    p.file_name().map(|x| x.to_string_lossy().to_string()).unwrap_or_default(),
+                    p.file_name()
+                        .map(|x| x.to_string_lossy().to_string())
+                        .unwrap_or_default(),
                     n
                 )
             })
@@ -104,7 +111,10 @@ impl std::fmt::Debug for Tokenizer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Tokenizer")
             .field("normalizer", &self.normalizer.as_ref().map(|n| n.name()))
-            .field("pre_tokenizer", &self.pre_tokenizer.as_ref().map(|p| p.name()))
+            .field(
+                "pre_tokenizer",
+                &self.pre_tokenizer.as_ref().map(|p| p.name()),
+            )
             .field("model", &self.model.type_name())
             .field("post_processor", &self.post_processor.name())
             .field("decoder", &self.decoder.as_ref().map(|d| d.name()))
@@ -183,7 +193,9 @@ impl Tokenizer {
     /// 由 HF `tokenizer.json` 反装（用于跨实现校验回读）。
     pub fn from_tokenizer_json(value: &Value) -> Result<Self> {
         hf::validate_tokenizer_json(value)?;
-        let model_json = value.get("model").ok_or_else(|| TokenizerError::config("缺 model 节"))?;
+        let model_json = value
+            .get("model")
+            .ok_or_else(|| TokenizerError::config("缺 model 节"))?;
         let model_wrapper = ModelWrapper::from_hf_json(model_json)?;
         let model_cfg = model_wrapper.to_model_config()?;
 
@@ -226,8 +238,12 @@ impl Tokenizer {
             post_processor,
             decoder,
             added_tokens,
-            truncation: serde_json::from_value(value.get("truncation").cloned().unwrap_or(Value::Null)).ok(),
-            padding: serde_json::from_value(value.get("padding").cloned().unwrap_or(Value::Null)).ok(),
+            truncation: serde_json::from_value(
+                value.get("truncation").cloned().unwrap_or(Value::Null),
+            )
+            .ok(),
+            padding: serde_json::from_value(value.get("padding").cloned().unwrap_or(Value::Null))
+                .ok(),
             model_max_length: default_max_len(),
             roles: TokenRoles::default(),
         };
@@ -267,7 +283,9 @@ impl Tokenizer {
     }
 
     pub fn model_config(&self) -> ModelConfig {
-        self.model.to_model_config().unwrap_or_else(|_| unreachable_config())
+        self.model
+            .to_model_config()
+            .unwrap_or_else(|_| unreachable_config())
     }
 
     pub fn roles(&self) -> &TokenRoles {
@@ -289,7 +307,13 @@ impl Tokenizer {
         let mut added = self.added_tokens.clone();
         let mut count = 0usize;
         for t in tokens {
-            if self.model.get_vocab().token_to_id(&t.content).is_some() {
+            if let Some(existing) = self.model.get_vocab().token_to_id(&t.content) {
+                // token 已在 base 词表（例如训练器把 special token 写进了 base vocab）：
+                // 必须补登记到后加视图，否则 `special_ids` / `skip_special_tokens` /
+                // `special_tokens_mask` 都会把它当普通 token（HF 中它同时在 vocab 与 added_tokens）。
+                self.model
+                    .get_vocab_mut()
+                    .register_added_view(t.clone(), existing)?;
                 if !added.iter().any(|x| x.content == t.content) {
                     added.push(t.clone());
                 }
@@ -324,19 +348,27 @@ impl Tokenizer {
     /// S0..S9：规范化 → 后加 token 前置切分 → 预分词 → 子词切分 → 截断 → 后处理。
     pub fn encode(&self, text: &str, add_special_tokens: bool) -> Result<Encoding> {
         let segs = self.encode_segments(&[text.to_string()])?;
-        let enc = self.post_processor.process_encodings(segs, add_special_tokens)?;
+        let enc = self
+            .post_processor
+            .process_encodings(segs, add_special_tokens)?;
         self.truncate_final(enc, add_special_tokens)
     }
 
     /// 双句编码（pair 语义）。
     pub fn encode_pair(&self, a: &str, b: &str, add_special_tokens: bool) -> Result<Encoding> {
         let segs = self.encode_segments(&[a.to_string(), b.to_string()])?;
-        let enc = self.post_processor.process_encodings(segs, add_special_tokens)?;
+        let enc = self
+            .post_processor
+            .process_encodings(segs, add_special_tokens)?;
         self.truncate_final(enc, add_special_tokens)
     }
 
     /// 批量编码（串行；`rayon` 并行留待 CLI 侧按批切分）。
-    pub fn encode_batch(&self, texts: &[String], add_special_tokens: bool) -> Result<Vec<Encoding>> {
+    pub fn encode_batch(
+        &self,
+        texts: &[String],
+        add_special_tokens: bool,
+    ) -> Result<Vec<Encoding>> {
         let mut out = Vec::with_capacity(texts.len());
         for t in texts {
             out.push(self.encode(t, add_special_tokens)?);
@@ -372,7 +404,9 @@ impl Tokenizer {
 
     /// 填充：策略（`BatchLongest` / `Fixed`）+ `pad_to_multiple_of`，并受 `model_max_length` 兜底约束。
     fn apply_padding(&self, mut enc: Encoding) -> Result<Encoding> {
-        let Some(p) = &self.padding else { return Ok(enc) };
+        let Some(p) = &self.padding else {
+            return Ok(enc);
+        };
         let mut target = match p.strategy {
             PaddingStrategy::BatchLongest => enc.len(),
             PaddingStrategy::Fixed(n) => n,
@@ -400,7 +434,7 @@ impl Tokenizer {
 
     fn encode_one(&self, text: &str) -> Result<Encoding> {
         // ---- S0 规范化（保持 original↔normalized 对齐）
-        let mut ns = NormalizedString::from_str(text);
+        let mut ns = NormalizedString::new(text);
         if let Some(n) = &self.normalizer {
             ns = n.normalize(ns);
         }
@@ -439,15 +473,12 @@ impl Tokenizer {
                     if seg.is_empty() {
                         continue;
                     }
-                    let mut local = NormalizedString::from_str(seg);
+                    let mut local = NormalizedString::new(seg);
                     if let Some(p) = &self.pre_tokenizer {
                         p.pre_tokenize(&mut local)?;
                     }
                     for pt in local.pretokens() {
-                        let abs = (
-                            unit.start + pt.offsets.0,
-                            unit.start + pt.offsets.1,
-                        );
+                        let abs = (unit.start + pt.offsets.0, unit.start + pt.offsets.1);
                         let outer = match ns.convert_offsets(abs) {
                             Some(o) => (o.start, o.end),
                             None => {
@@ -476,10 +507,8 @@ impl Tokenizer {
                             // （current_segments/splits 均为字节，见 types.rs），各 Model 的
                             // token.offsets 也以 pt.value 的字节计（bpe 用 char_indices 的字节跨度、
                             // wordpiece/unigram 亦然），因此直接相加，不做字节→字符换算。
-                            let rel = (
-                                pt.n_offsets.0 + sw.offsets.0,
-                                pt.n_offsets.0 + sw.offsets.1,
-                            );
+                            let rel =
+                                (pt.n_offsets.0 + sw.offsets.0, pt.n_offsets.0 + sw.offsets.1);
                             let (s, e) = match local.convert_offsets(rel) {
                                 Some(o) => {
                                     let abs = (unit.start + o.start, unit.start + o.end);
@@ -494,12 +523,10 @@ impl Tokenizer {
                                 // 对齐表未命中：退化为整个预分词单元区间
                                 None => (outer.0, outer.1),
                             };
-                            // 对外语义与 HF 对齐：offsets 输出**原文字符**区间（内部全程为字节）
-                            let (s, e) = if is_special {
-                                (0, 0)
-                            } else {
-                                (byte_to_char_index(text, s), byte_to_char_index(text, e))
-                            };
+                            // 对外语义与 HF 对齐：offsets 输出**原文字符**区间（内部全程为字节）。
+                            // 注意：特殊 token 也保留真实区间（HF 的 offsets 不因 special 置零，
+                            // 只有 special_tokens_mask 标 1），因此这里不再对 is_special 特判。
+                            let (s, e) = (byte_to_char_index(text, s), byte_to_char_index(text, e));
                             enc.offsets.push((s, e));
                             enc.attention_mask.push(1);
                             enc.special_tokens_mask.push(if is_special { 1 } else { 0 });
@@ -535,7 +562,10 @@ impl Tokenizer {
                         continue;
                     }
                     let t = vocab.id_to_token(*id).ok_or_else(|| {
-                        TokenizerError::layer(layer::DECODER, format!("解码失败：词表中不存在 id {}", id))
+                        TokenizerError::layer(
+                            layer::DECODER,
+                            format!("解码失败：词表中不存在 id {}", id),
+                        )
                     })?;
                     out.push_str(&t);
                 }
@@ -603,8 +633,14 @@ impl Tokenizer {
 
     /// 解码器与词表的绑定检查（如 WordPiece 的 `##` 前缀需与模型配置一致）。
     fn refresh_decoder_binding(&self) -> Result<()> {
-        if let Some(DecoderConfig::WordPiece { prefix, .. }) = self.decoder.as_ref().and_then(|d| d.config()) {
-            if let ModelConfig::WordPiece { continuing_subword_prefix, .. } = self.model_config() {
+        if let Some(DecoderConfig::WordPiece { prefix, .. }) =
+            self.decoder.as_ref().and_then(|d| d.config())
+        {
+            if let ModelConfig::WordPiece {
+                continuing_subword_prefix,
+                ..
+            } = self.model_config()
+            {
                 if prefix != &continuing_subword_prefix {
                     return Err(TokenizerError::config(format!(
                         "解码器 WordPiece 前缀 '{}' 与模型配置 '{}' 不一致",
@@ -637,7 +673,9 @@ impl Tokenizer {
         let added = self.added_with_ids();
         let added_json: Vec<Value> = added
             .iter()
-            .map(|(t, id)| serde_json::to_value(AddedTokenWithId::from_token(t, *id)).unwrap_or(Value::Null))
+            .map(|(t, id)| {
+                serde_json::to_value(AddedTokenWithId::from_token(t, *id)).unwrap_or(Value::Null)
+            })
             .collect();
 
         let doc = HfTokenizerJson {
@@ -692,20 +730,32 @@ impl Tokenizer {
     /// 落盘 `save_pretrained`：三份 HF 文件 + 模型侧文件（如 BPE 的 vocab.json / merges.txt）。
     pub fn save_pretrained(&self, dir: &Path) -> Result<SavedFiles> {
         std::fs::create_dir_all(dir)?;
-        let mut saved = SavedFiles { dir: dir.to_path_buf(), files: Vec::new() };
+        let mut saved = SavedFiles {
+            dir: dir.to_path_buf(),
+            files: Vec::new(),
+        };
 
         let tj = self.to_tokenizer_json()?;
-        saved.files.push(hf::write_json(&dir.join(hf::TOKENIZER_JSON), &tj)?);
+        saved
+            .files
+            .push(hf::write_json(&dir.join(hf::TOKENIZER_JSON), &tj)?);
 
         let tc = self.to_tokenizer_config_json()?;
-        saved.files.push(hf::write_json(&dir.join(hf::TOKENIZER_CONFIG_JSON), &tc)?);
+        saved
+            .files
+            .push(hf::write_json(&dir.join(hf::TOKENIZER_CONFIG_JSON), &tc)?);
 
         let stm = self.to_special_tokens_map_json()?;
-        saved.files.push(hf::write_json(&dir.join(hf::SPECIAL_TOKENS_MAP_JSON), &stm)?);
+        saved.files.push(hf::write_json(
+            &dir.join(hf::SPECIAL_TOKENS_MAP_JSON),
+            &stm,
+        )?);
 
         for name in self.model.save(dir)? {
             let p = dir.join(&name);
-            let lines = std::fs::read_to_string(&p).map(|s| s.lines().count()).unwrap_or(0);
+            let lines = std::fs::read_to_string(&p)
+                .map(|s| s.lines().count())
+                .unwrap_or(0);
             saved.files.push((p, lines));
         }
         Ok(saved)
@@ -770,11 +820,18 @@ fn model_unk_token(cfg: &ModelConfig) -> Option<String> {
 }
 
 fn unreachable_config() -> ModelConfig {
-    ModelConfig::WordLevel { unk_token: "<unk>".to_string(), vocab: Default::default() }
+    ModelConfig::WordLevel {
+        unk_token: "<unk>".to_string(),
+        vocab: Default::default(),
+    }
 }
 
 /// 便捷构造：字节级 BPE + ByteLevel 预分词/解码 + ByteLevel 后处理（GPT-2 同构）。
-pub fn byte_level_bpe(vocab: BTreeMap<String, u32>, merges: Vec<tok_models::MergeSpec>, roles: TokenRoles) -> PipelineConfig {
+pub fn byte_level_bpe(
+    vocab: BTreeMap<String, u32>,
+    merges: Vec<tok_models::MergeSpec>,
+    roles: TokenRoles,
+) -> PipelineConfig {
     PipelineConfig {
         normalizer: None,
         pre_tokenizer: Some(PreTokenizerConfig::ByteLevel {
@@ -809,9 +866,18 @@ pub fn byte_level_bpe(vocab: BTreeMap<String, u32>, merges: Vec<tok_models::Merg
 
 /// 便捷构造：BERT 风格（BertPreTokenizer + WordPiece + TemplateProcessing + WordPiece 解码）。
 pub fn bert_like(vocab: BTreeMap<String, u32>, roles: TokenRoles) -> PipelineConfig {
-    let unk = roles.unk_token.clone().unwrap_or_else(|| "[UNK]".to_string());
-    let cls = roles.cls_token.clone().unwrap_or_else(|| "[CLS]".to_string());
-    let sep = roles.sep_token.clone().unwrap_or_else(|| "[SEP]".to_string());
+    let unk = roles
+        .unk_token
+        .clone()
+        .unwrap_or_else(|| "[UNK]".to_string());
+    let cls = roles
+        .cls_token
+        .clone()
+        .unwrap_or_else(|| "[CLS]".to_string());
+    let sep = roles
+        .sep_token
+        .clone()
+        .unwrap_or_else(|| "[SEP]".to_string());
     PipelineConfig {
         normalizer: Some(NormalizerConfig::Sequence {
             normalizers: vec![
@@ -843,7 +909,10 @@ pub fn bert_like(vocab: BTreeMap<String, u32>, roles: TokenRoles) -> PipelineCon
             ],
             special_tokens: Default::default(),
         }),
-        decoder: Some(DecoderConfig::WordPiece { prefix: "##".to_string(), cleanup: true }),
+        decoder: Some(DecoderConfig::WordPiece {
+            prefix: "##".to_string(),
+            cleanup: true,
+        }),
         added_tokens: Vec::new(),
         truncation: None,
         padding: None,

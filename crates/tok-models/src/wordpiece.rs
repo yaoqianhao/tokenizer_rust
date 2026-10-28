@@ -6,8 +6,8 @@
 use ahash::AHashMap;
 use serde::{Deserialize, Serialize};
 use tok_core::{
-    AddedToken, Model, Result, Token, TokenizerError, Trainer, TrainerArtifact, TrainerParams, Vocabulary,
-    layer,
+    layer, AddedToken, Model, Result, Token, TokenizerError, Trainer, TrainerArtifact,
+    TrainerParams, Vocabulary,
 };
 
 /// WordPiece 模型。
@@ -57,7 +57,11 @@ impl Model for WordPieceModel {
         let unk = |s: &str| -> Result<Vec<Token>> {
             match self.unk_id() {
                 // HF 语义：未登录词输出 unk_token 字面值（如 "[UNK]"），偏移覆盖整词
-                Some(id) => Ok(vec![Token { id, value: self.unk_token.clone(), offsets: (0, s.len()) }]),
+                Some(id) => Ok(vec![Token {
+                    id,
+                    value: self.unk_token.clone(),
+                    offsets: (0, s.len()),
+                }]),
                 None => Err(TokenizerError::layer(
                     layer::MODEL,
                     format!("WordPiece：未登录词 '{}' 且缺少 unk_token", s),
@@ -90,9 +94,17 @@ impl Model for WordPieceModel {
                 Some((token, next)) => {
                     let id = self.vocab.token_to_id(&token).unwrap();
                     let b_start = chars[start].0;
-                    let b_end = if next < chars.len() { chars[next].0 } else { sequence.len() };
+                    let b_end = if next < chars.len() {
+                        chars[next].0
+                    } else {
+                        sequence.len()
+                    };
                     // HF 语义：续接片段在 `tokens` 中原样保留 `##` 前缀（去前缀由解码层负责）
-                    out.push(Token { id, value: token, offsets: (b_start, b_end) });
+                    out.push(Token {
+                        id,
+                        value: token,
+                        offsets: (b_start, b_end),
+                    });
                     start = next;
                 }
                 None => return unk(sequence),
@@ -120,7 +132,10 @@ impl Model for WordPieceModel {
     }
 
     fn get_trainer(&self, params: &TrainerParams) -> Option<Box<dyn Trainer>> {
-        Some(Box::new(WordPieceTrainer::new(params.clone(), self.unk_token.clone())))
+        Some(Box::new(WordPieceTrainer::new(
+            params.clone(),
+            self.unk_token.clone(),
+        )))
     }
 
     fn apply_artifact(&mut self, artifact: &TrainerArtifact) -> Result<()> {
@@ -133,7 +148,10 @@ impl Model for WordPieceModel {
                 self.vocab = v;
                 Ok(())
             }
-            _ => Err(TokenizerError::layer(layer::MODEL, "artifact 不是 WordPiece 类型")),
+            _ => Err(TokenizerError::layer(
+                layer::MODEL,
+                "artifact 不是 WordPiece 类型",
+            )),
         }
     }
 }
@@ -199,7 +217,10 @@ impl Trainer for WordPieceTrainer {
 
     fn finish(&mut self) -> Result<TrainerArtifact> {
         if self.fed == 0 {
-            return Err(TokenizerError::layer(layer::MODEL, "WordPiece 训练：语料为空"));
+            return Err(TokenizerError::layer(
+                layer::MODEL,
+                "WordPiece 训练：语料为空",
+            ));
         }
         // 1) 字母表（单字符）
         let mut chars: Vec<char> = self
@@ -243,7 +264,11 @@ impl Trainer for WordPieceTrainer {
             if vocab.len() >= budget {
                 break;
             }
-            if self.max_token_length.map(|m| w.chars().count() > m).unwrap_or(false) {
+            if self
+                .max_token_length
+                .map(|m| w.chars().count() > m)
+                .unwrap_or(false)
+            {
                 continue;
             }
             push(w.clone(), &mut vocab, &mut next_id);
@@ -299,7 +324,14 @@ mod tests {
 
     fn model() -> WordPieceModel {
         let mut v = Vocabulary::new();
-        for (t, id) in [("[UNK]", 0u32), ("un", 1), ("##want", 2), ("##ed", 3), ("he", 4), ("##llo", 5)] {
+        for (t, id) in [
+            ("[UNK]", 0u32),
+            ("un", 1),
+            ("##want", 2),
+            ("##ed", 3),
+            ("he", 4),
+            ("##llo", 5),
+        ] {
             v.insert(t, id).unwrap();
         }
         WordPieceModel::new(v, "[UNK]")
@@ -336,10 +368,17 @@ mod tests {
 
     #[test]
     fn trainer_keeps_unk_in_vocab() {
-        let params = TrainerParams { vocab_size: 30, min_frequency: 1, ..Default::default() };
+        let params = TrainerParams {
+            vocab_size: 30,
+            min_frequency: 1,
+            ..Default::default()
+        };
         let mut t = WordPieceTrainer::new(params, "[UNK]");
-        t.feed_groups(&[vec!["hello".into(), "world".into()]]).unwrap();
-        let TrainerArtifact::WordPiece { vocab } = t.finish().unwrap() else { panic!() };
+        t.feed_groups(&[vec!["hello".into(), "world".into()]])
+            .unwrap();
+        let TrainerArtifact::WordPiece { vocab } = t.finish().unwrap() else {
+            panic!()
+        };
         assert!(vocab.iter().any(|(s, _)| s == "[UNK]"));
         assert!(vocab.iter().any(|(s, _)| s == "##llo" || s == "##lo"));
     }

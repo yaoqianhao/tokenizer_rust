@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use tok_core::{Result, TokenizerError, layer};
+use tok_core::{layer, Result, TokenizerError};
 
 /// 语料数据：文件清单 + 按行展开的文本。
 #[derive(Debug, Clone, Default)]
@@ -59,7 +59,10 @@ impl CorpusReader {
     }
 
     pub fn extensions(mut self, exts: Vec<String>) -> Self {
-        self.extensions = exts.into_iter().map(|e| e.trim_start_matches('.').to_lowercase()).collect();
+        self.extensions = exts
+            .into_iter()
+            .map(|e| e.trim_start_matches('.').to_lowercase())
+            .collect();
         self
     }
 
@@ -96,7 +99,10 @@ impl CorpusReader {
         out.sort();
         out.dedup();
         if out.is_empty() {
-            return Err(TokenizerError::layer(layer::FACADE, "语料路径下没有匹配的文本文件"));
+            return Err(TokenizerError::layer(
+                layer::FACADE,
+                "语料路径下没有匹配的文本文件",
+            ));
         }
         Ok(out)
     }
@@ -104,7 +110,10 @@ impl CorpusReader {
     /// 读取并按行返回。
     pub fn read(&self) -> Result<CorpusData> {
         let files = self.discover()?;
-        let mut data = CorpusData { files: files.clone(), ..Default::default() };
+        let mut data = CorpusData {
+            files: files.clone(),
+            ..Default::default()
+        };
         if self.parallel && files.len() > 1 {
             use rayon::prelude::*;
             let limit = self.max_lines;
@@ -130,7 +139,11 @@ impl CorpusReader {
             }
         } else {
             for f in &files {
-                let lines = read_one(f, self.max_line_bytes, self.max_lines.map(|c| c - data.lines.len()))?;
+                let lines = read_one(
+                    f,
+                    self.max_line_bytes,
+                    self.max_lines.map(|c| c - data.lines.len()),
+                )?;
                 data.lines.extend(lines);
                 if let Some(cap) = self.max_lines {
                     if data.lines.len() >= cap {
@@ -140,7 +153,10 @@ impl CorpusReader {
             }
         }
         if data.lines.is_empty() {
-            return Err(TokenizerError::layer(layer::FACADE, "语料为空（没有读到任何行）"));
+            return Err(TokenizerError::layer(
+                layer::FACADE,
+                "语料为空（没有读到任何行）",
+            ));
         }
         Ok(data)
     }
@@ -170,7 +186,10 @@ fn collect_dir(dir: &Path, recursive: bool, exts: &[String], out: &mut Vec<PathB
 
 fn read_one(path: &Path, max_line_bytes: usize, limit: Option<usize>) -> Result<Vec<String>> {
     let content = std::fs::read_to_string(path).map_err(|e| {
-        TokenizerError::layer(layer::FACADE, format!("读取语料失败 {}: {}", path.display(), e))
+        TokenizerError::layer(
+            layer::FACADE,
+            format!("读取语料失败 {}: {}", path.display(), e),
+        )
     })?;
     let content = content.replace("\r\n", "\n").replace('\r', "\n");
     let mut out = Vec::new();
@@ -220,7 +239,10 @@ mod tests {
         std::fs::write(&b, "should be ignored").unwrap();
 
         let data = CorpusReader::new(vec![dir.clone()]).read().unwrap();
-        assert_eq!(data.lines, vec!["hello world".to_string(), "second line".to_string()]);
+        assert_eq!(
+            data.lines,
+            vec!["hello world".to_string(), "second line".to_string()]
+        );
         assert_eq!(data.files.len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -230,7 +252,10 @@ mod tests {
         let dir = tmpdir("maxlines");
         let a = dir.join("c.txt");
         std::fs::write(&a, "1\n2\n3\n4\n5\n").unwrap();
-        let data = CorpusReader::new(vec![a]).max_lines(Some(2)).read().unwrap();
+        let data = CorpusReader::new(vec![a])
+            .max_lines(Some(2))
+            .read()
+            .unwrap();
         assert_eq!(data.lines.len(), 2);
         let _ = std::fs::remove_dir_all(&dir);
     }

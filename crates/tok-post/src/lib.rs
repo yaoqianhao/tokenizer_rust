@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use tok_core::{Encoding, PostProcessor, Result, TokenizerError, layer};
+use tok_core::{layer, Encoding, PostProcessor, Result, TokenizerError};
 
 /// 模板元素：特殊 token 或序列占位（`A` / `B`）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,11 +53,19 @@ pub struct SequenceId {
 impl TemplatePiece {
     pub fn special(content: impl Into<String>, type_id: u32) -> Self {
         TemplatePiece::SpecialToken(SpecialTokenPiece {
-            special_token: SpecialTokenId { id: content.into(), type_id },
+            special_token: SpecialTokenId {
+                id: content.into(),
+                type_id,
+            },
         })
     }
     pub fn sequence(id: &str, type_id: u32) -> Self {
-        TemplatePiece::Sequence(SequencePiece { sequence: SequenceId { id: id.to_string(), type_id } })
+        TemplatePiece::Sequence(SequencePiece {
+            sequence: SequenceId {
+                id: id.to_string(),
+                type_id,
+            },
+        })
     }
 }
 
@@ -86,7 +94,10 @@ pub enum PostProcessorConfig {
         special_tokens: BTreeMap<String, SpecialTokenEntry>,
     },
     #[serde(rename = "BertProcessing")]
-    BertProcessing { sep: (String, u32), cls: (String, u32) },
+    BertProcessing {
+        sep: (String, u32),
+        cls: (String, u32),
+    },
     #[serde(rename = "RobertaProcessing")]
     RobertaProcessing {
         sep: (String, u32),
@@ -106,7 +117,9 @@ pub enum PostProcessorConfig {
         use_regex: bool,
     },
     #[serde(rename = "Sequence")]
-    Sequence { processors: Vec<PostProcessorConfig> },
+    Sequence {
+        processors: Vec<PostProcessorConfig>,
+    },
 }
 
 fn default_true() -> bool {
@@ -124,7 +137,10 @@ pub struct PostProcessorWrapper {
 impl PostProcessorWrapper {
     /// 无后处理：直接透传（HF 中 `post_processor` 缺省）。
     pub fn identity() -> Self {
-        Self { cfg: None, table: BTreeMap::new() }
+        Self {
+            cfg: None,
+            table: BTreeMap::new(),
+        }
     }
 
     pub fn is_identity(&self) -> bool {
@@ -148,10 +164,18 @@ impl PostProcessorWrapper {
 
     pub fn build(cfg: &PostProcessorConfig) -> Result<Self> {
         let mut table = BTreeMap::new();
-        if let PostProcessorConfig::TemplateProcessing { single, pair, special_tokens } = cfg {
+        if let PostProcessorConfig::TemplateProcessing {
+            single,
+            pair,
+            special_tokens,
+        } = cfg
+        {
             for (literal, entry) in special_tokens {
                 let id = entry.ids.first().copied().ok_or_else(|| {
-                    TokenizerError::config(format!("special_tokens['{}'].ids 为空，无法确定 id", literal))
+                    TokenizerError::config(format!(
+                        "special_tokens['{}'].ids 为空，无法确定 id",
+                        literal
+                    ))
                 })?;
                 table.insert(literal.clone(), id);
                 table.insert(entry.id.clone(), id);
@@ -163,13 +187,20 @@ impl PostProcessorWrapper {
                     }
                 }
             }
-            if pair.iter().any(|p| matches!(p, TemplatePiece::Sequence(s) if s.sequence.id == "B"))
-                && single.iter().any(|p| matches!(p, TemplatePiece::Sequence(s) if s.sequence.id == "B"))
+            if pair
+                .iter()
+                .any(|p| matches!(p, TemplatePiece::Sequence(s) if s.sequence.id == "B"))
+                && single
+                    .iter()
+                    .any(|p| matches!(p, TemplatePiece::Sequence(s) if s.sequence.id == "B"))
             {
                 return Err(TokenizerError::config("single 模板中不应出现序列 B"));
             }
         }
-        Ok(Self { cfg: Some(cfg.clone()), table })
+        Ok(Self {
+            cfg: Some(cfg.clone()),
+            table,
+        })
     }
 
     /// 模板引用的特殊 token 字面值（`tok-pipeline` 用于补登记 added_tokens 后再调用本层）。
@@ -240,7 +271,11 @@ impl PostProcessorWrapper {
     }
 
     /// 主入口：把 1~2 条 `Encoding` 装配为最终 `Encoding`。
-    pub fn process_encodings(&self, encodings: Vec<Encoding>, add_special_tokens: bool) -> Result<Encoding> {
+    pub fn process_encodings(
+        &self,
+        encodings: Vec<Encoding>,
+        add_special_tokens: bool,
+    ) -> Result<Encoding> {
         let is_pair = encodings.len() >= 2;
         match &self.cfg {
             None => Ok(concat_plain(encodings)),
@@ -249,7 +284,10 @@ impl PostProcessorWrapper {
                 let tpl: Vec<TemplatePiece> = if add_special_tokens {
                     tpl.clone()
                 } else {
-                    tpl.iter().filter(|p| !matches!(p, TemplatePiece::SpecialToken(_))).cloned().collect()
+                    tpl.iter()
+                        .filter(|p| !matches!(p, TemplatePiece::SpecialToken(_)))
+                        .cloned()
+                        .collect()
                 };
                 self.compose(&tpl, encodings)
             }
@@ -295,11 +333,17 @@ impl PostProcessorWrapper {
                         out.type_ids.push(ty);
                         out.tokens.push(src.tokens[i].clone());
                         out.offsets.push(src.offsets[i]);
-                        out.attention_mask.push(src.attention_mask.get(i).copied().unwrap_or(1));
-                        out.special_tokens_mask.push(src.special_tokens_mask.get(i).copied().unwrap_or(0));
+                        out.attention_mask
+                            .push(src.attention_mask.get(i).copied().unwrap_or(1));
+                        out.special_tokens_mask
+                            .push(src.special_tokens_mask.get(i).copied().unwrap_or(0));
                     }
                     out.offsets_degraded |= src.offsets_degraded;
-                    let key = if seq.sequence.id.eq_ignore_ascii_case("B") { 1 } else { 0 };
+                    let key = if seq.sequence.id.eq_ignore_ascii_case("B") {
+                        1
+                    } else {
+                        0
+                    };
                     out.sequence_ranges.insert(key, (start, out.ids.len()));
                     seq_idx += 1;
                 }
@@ -314,8 +358,10 @@ impl PostProcessorWrapper {
                 out.type_ids.push(src.type_ids.get(i).copied().unwrap_or(0));
                 out.tokens.push(src.tokens[i].clone());
                 out.offsets.push(src.offsets[i]);
-                out.attention_mask.push(src.attention_mask.get(i).copied().unwrap_or(1));
-                out.special_tokens_mask.push(src.special_tokens_mask.get(i).copied().unwrap_or(0));
+                out.attention_mask
+                    .push(src.attention_mask.get(i).copied().unwrap_or(1));
+                out.special_tokens_mask
+                    .push(src.special_tokens_mask.get(i).copied().unwrap_or(0));
             }
             out.offsets_degraded |= src.offsets_degraded;
             out.sequence_ranges.insert(seq_idx, (start, out.ids.len()));
@@ -326,7 +372,12 @@ impl PostProcessorWrapper {
     }
 }
 
-fn bert_template(cls: &(String, u32), sep: &(String, u32), add_special: bool, pairs: bool) -> Vec<TemplatePiece> {
+fn bert_template(
+    cls: &(String, u32),
+    sep: &(String, u32),
+    add_special: bool,
+    pairs: bool,
+) -> Vec<TemplatePiece> {
     let mut v = Vec::new();
     if add_special {
         v.push(TemplatePiece::special(cls.0.clone(), cls.1));
@@ -346,7 +397,12 @@ fn bert_template(cls: &(String, u32), sep: &(String, u32), add_special: bool, pa
     v
 }
 
-fn roberta_template(cls: &(String, u32), sep: &(String, u32), add_special: bool, pairs: bool) -> Vec<TemplatePiece> {
+fn roberta_template(
+    cls: &(String, u32),
+    sep: &(String, u32),
+    add_special: bool,
+    pairs: bool,
+) -> Vec<TemplatePiece> {
     let mut v = Vec::new();
     if add_special {
         v.push(TemplatePiece::special(cls.0.clone(), cls.1));
@@ -378,8 +434,10 @@ fn concat_plain(encodings: Vec<Encoding>) -> Encoding {
             out.type_ids.push(src.type_ids.get(i).copied().unwrap_or(0));
             out.tokens.push(src.tokens[i].clone());
             out.offsets.push(src.offsets[i]);
-            out.attention_mask.push(src.attention_mask.get(i).copied().unwrap_or(1));
-            out.special_tokens_mask.push(src.special_tokens_mask.get(i).copied().unwrap_or(0));
+            out.attention_mask
+                .push(src.attention_mask.get(i).copied().unwrap_or(1));
+            out.special_tokens_mask
+                .push(src.special_tokens_mask.get(i).copied().unwrap_or(0));
         }
         out.offsets_degraded |= src.offsets_degraded;
         out.sequence_ranges.insert(idx, (start, out.ids.len()));
@@ -397,7 +455,12 @@ fn push_special(out: &mut Encoding, id: u32, token: &str, type_id: u32) {
 }
 
 impl PostProcessor for PostProcessorWrapper {
-    fn process(&self, encoding: Encoding, pair: Option<Encoding>, add_special_tokens: bool) -> Result<Encoding> {
+    fn process(
+        &self,
+        encoding: Encoding,
+        pair: Option<Encoding>,
+        add_special_tokens: bool,
+    ) -> Result<Encoding> {
         let mut v = vec![encoding];
         if let Some(p) = pair {
             v.push(p);
@@ -410,7 +473,9 @@ impl PostProcessor for PostProcessorWrapper {
             None => 0,
             Some(PostProcessorConfig::TemplateProcessing { single, pair, .. }) => {
                 let t = if is_pair { pair } else { single };
-                t.iter().filter(|p| matches!(p, TemplatePiece::SpecialToken(_))).count()
+                t.iter()
+                    .filter(|p| matches!(p, TemplatePiece::SpecialToken(_)))
+                    .count()
             }
             Some(PostProcessorConfig::BertProcessing { .. }) => 2,
             Some(PostProcessorConfig::RobertaProcessing { .. }) => {
@@ -432,18 +497,26 @@ impl PostProcessor for PostProcessorWrapper {
     fn to_config_json(&self) -> Result<serde_json::Value> {
         match &self.cfg {
             None => Ok(serde_json::Value::Null),
-            Some(PostProcessorConfig::TemplateProcessing { single, pair, special_tokens }) => {
+            Some(PostProcessorConfig::TemplateProcessing {
+                single,
+                pair,
+                special_tokens,
+            }) => {
                 // HF 要求 `TemplateProcessing.special_tokens` 自带 ids/tokens：把 `bind_vocab`
                 // 解析出的 id 回填后才能被外部实现（HF `tokenizers`）自解析；
                 // 已有条目保持原样，保证配置精确往返。
                 let mut map = special_tokens.clone();
                 for literal in self.required_specials() {
-                    let Some(id) = self.table.get(&literal).copied() else { continue };
-                    let entry = map.entry(literal.clone()).or_insert_with(|| SpecialTokenEntry {
-                        id: literal.clone(),
-                        ids: Vec::new(),
-                        tokens: Vec::new(),
-                    });
+                    let Some(id) = self.table.get(&literal).copied() else {
+                        continue;
+                    };
+                    let entry = map
+                        .entry(literal.clone())
+                        .or_insert_with(|| SpecialTokenEntry {
+                            id: literal.clone(),
+                            ids: Vec::new(),
+                            tokens: Vec::new(),
+                        });
                     if entry.ids.is_empty() {
                         entry.ids.push(id);
                     }
@@ -501,7 +574,9 @@ mod tests {
         .unwrap();
         // 模板引用的特殊 token 必须先绑定词表才能解析出 id（L5 契约）
         p.bind_vocab(&cls_sep_vocab()).unwrap();
-        let single = p.process_encodings(vec![enc(&[10, 11], &["a", "b"])], true).unwrap();
+        let single = p
+            .process_encodings(vec![enc(&[10, 11], &["a", "b"])], true)
+            .unwrap();
         assert_eq!(single.ids, vec![0, 10, 11, 1]);
         let pair = p
             .process_encodings(vec![enc(&[10, 11], &["a", "b"]), enc(&[12], &["c"])], true)
@@ -521,7 +596,9 @@ mod tests {
             cls: ("[CLS]".into(), 0),
         })
         .unwrap();
-        let out = p.process_encodings(vec![enc(&[10], &["a"])], false).unwrap();
+        let out = p
+            .process_encodings(vec![enc(&[10], &["a"])], false)
+            .unwrap();
         assert_eq!(out.ids, vec![10]);
         assert_eq!(out.special_tokens_mask, vec![0]);
     }
@@ -538,19 +615,26 @@ mod tests {
         )
         .unwrap();
         let p = PostProcessorWrapper::build(&cfg).unwrap();
-        assert_eq!(p.required_specials(), vec!["<s>".to_string(), "</s>".to_string()]);
+        assert_eq!(
+            p.required_specials(),
+            vec!["<s>".to_string(), "</s>".to_string()]
+        );
         assert_eq!(p.added_tokens(false), 2);
         assert_eq!(p.added_tokens(true), 2);
         let out = p.process_encodings(vec![enc(&[5], &["x"])], true).unwrap();
         assert_eq!(out.ids, vec![1, 5, 2]);
         // 精确往返
-        let back: PostProcessorConfig = serde_json::from_value(p.to_config_json().unwrap()).unwrap();
+        let back: PostProcessorConfig =
+            serde_json::from_value(p.to_config_json().unwrap()).unwrap();
         assert_eq!(back, cfg);
     }
 
     #[test]
     fn bind_vocab_fills_missing_special() {
-        let cfg = PostProcessorConfig::BertProcessing { sep: ("[SEP]".into(), 0), cls: ("[CLS]".into(), 0) };
+        let cfg = PostProcessorConfig::BertProcessing {
+            sep: ("[SEP]".into(), 0),
+            cls: ("[CLS]".into(), 0),
+        };
         let mut p = PostProcessorWrapper::build(&cfg).unwrap();
         let mut v = cls_sep_vocab();
         v.add_special(AddedToken::new("[MASK]", true), 2).unwrap();
@@ -563,7 +647,9 @@ mod tests {
     fn identity_passthrough() {
         let p = PostProcessorWrapper::identity();
         assert!(p.is_identity());
-        let out = p.process_encodings(vec![enc(&[3, 4], &["a", "b"])], true).unwrap();
+        let out = p
+            .process_encodings(vec![enc(&[3, 4], &["a", "b"])], true)
+            .unwrap();
         assert_eq!(out.ids, vec![3, 4]);
         assert_eq!(out.sequence_ranges.get(&0).copied(), Some((0, 2)));
         assert_eq!(p.to_config_json().unwrap(), serde_json::Value::Null);

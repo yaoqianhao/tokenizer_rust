@@ -53,7 +53,8 @@ pub trait Model: Send + Sync {
             // special_tokens_mask / skip_special_tokens 均依赖该视图）。
             if let Some(existing) = self.get_vocab().token_to_id(&t.content) {
                 if self.get_vocab().added().token_to_id(&t.content).is_none() {
-                    self.get_vocab_mut().register_added_view(t.clone(), existing)?;
+                    self.get_vocab_mut()
+                        .register_added_view(t.clone(), existing)?;
                 }
                 continue;
             }

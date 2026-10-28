@@ -29,7 +29,10 @@ pub enum TokenizerError {
 
 impl TokenizerError {
     pub fn layer(layer: u8, message: impl Into<String>) -> Self {
-        TokenizerError::Layer { layer, message: message.into() }
+        TokenizerError::Layer {
+            layer,
+            message: message.into(),
+        }
     }
     pub fn config(message: impl Into<String>) -> Self {
         TokenizerError::Config(message.into())

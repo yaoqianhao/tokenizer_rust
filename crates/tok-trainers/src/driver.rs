@@ -2,11 +2,11 @@
 
 use std::time::Instant;
 
-use tok_core::{
-    AddedToken, Model, NormalizedString, Normalizer, PreTokenizer, Result, Trainer, TrainerArtifact,
-    TrainerParams, layer,
-};
 use tok_core::error::TokenizerError;
+use tok_core::{
+    layer, AddedToken, Model, NormalizedString, Normalizer, PreTokenizer, Result, Trainer,
+    TrainerArtifact, TrainerParams,
+};
 
 use crate::TrainerReport;
 
@@ -23,7 +23,12 @@ pub struct TrainOptions<'a> {
 
 impl<'a> TrainOptions<'a> {
     pub fn new(params: TrainerParams) -> Self {
-        Self { params, normalizer: None, pre_tokenizer: None, batch_lines: 10_000 }
+        Self {
+            params,
+            normalizer: None,
+            pre_tokenizer: None,
+            batch_lines: 10_000,
+        }
     }
 
     pub fn with_normalizer(mut self, n: &'a dyn Normalizer) -> Self {
@@ -49,7 +54,7 @@ pub fn prepare_words(
     normalizer: Option<&dyn Normalizer>,
     pre_tokenizer: Option<&dyn PreTokenizer>,
 ) -> Result<(Vec<String>, bool)> {
-    let mut ns = NormalizedString::from_str(line);
+    let mut ns = NormalizedString::new(line);
     if let Some(n) = normalizer {
         ns = n.normalize(ns);
     }
@@ -72,7 +77,11 @@ pub fn prepare_words(
 /// 2. 分批喂入预处理后的语料（`Trainer::feed_groups`）；
 /// 3. 收尾得到 `TrainerArtifact`，回填模型（`Model::apply_artifact`）；
 /// 4. 补齐 `TrainerParams.special_tokens`（训练器已含则跳过），返回报告。
-pub fn train_model(model: &mut dyn Model, lines: &[String], opts: &TrainOptions<'_>) -> Result<TrainerReport> {
+pub fn train_model(
+    model: &mut dyn Model,
+    lines: &[String],
+    opts: &TrainOptions<'_>,
+) -> Result<TrainerReport> {
     let started = Instant::now();
     let model_type = model_type_of(model);
 
@@ -116,13 +125,20 @@ pub fn train_model(model: &mut dyn Model, lines: &[String], opts: &TrainOptions<
     for s in &opts.params.special_tokens {
         if model.get_vocab().token_to_id(s).is_none() {
             let id = model.get_vocab().max_id() + 1;
-            model.get_vocab_mut().add_special(AddedToken::new(s.clone(), true), id)?;
+            model
+                .get_vocab_mut()
+                .add_special(AddedToken::new(s.clone(), true), id)?;
             specials_added += 1;
         }
     }
 
     let byte_fallback_reserved = if opts.params.byte_fallback {
-        (0..=255u32).all(|b| model.get_vocab().token_to_id(&format!("<0x{:02X}>", b)).is_some())
+        (0..=255u32).all(|b| {
+            model
+                .get_vocab()
+                .token_to_id(&format!("<0x{:02X}>", b))
+                .is_some()
+        })
     } else {
         true
     };
@@ -145,7 +161,11 @@ fn model_type_of(model: &dyn Model) -> String {
     model
         .to_hf_json()
         .ok()
-        .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(|s| s.to_string()))
+        .and_then(|v| {
+            v.get("type")
+                .and_then(|t| t.as_str())
+                .map(|s| s.to_string())
+        })
         .unwrap_or_else(|| "Unknown".to_string())
 }
 
@@ -161,7 +181,11 @@ mod tests {
 
     impl Model for StubModel {
         fn tokenize(&self, sequence: &str) -> Result<Vec<tok_core::Token>> {
-            Ok(vec![tok_core::Token { id: 0, value: sequence.to_string(), offsets: (0, sequence.len()) }])
+            Ok(vec![tok_core::Token {
+                id: 0,
+                value: sequence.to_string(),
+                offsets: (0, sequence.len()),
+            }])
         }
         fn get_vocab(&self) -> &Vocabulary {
             &self.vocab
@@ -209,7 +233,9 @@ mod tests {
 
     #[test]
     fn train_driver_fills_vocab_and_specials() {
-        let mut model = StubModel { vocab: Vocabulary::new() };
+        let mut model = StubModel {
+            vocab: Vocabulary::new(),
+        };
         let params = TrainerParams {
             vocab_size: 16,
             min_frequency: 1,

@@ -2,8 +2,8 @@
 
 use ahash::AHashMap;
 use tok_core::{
-    AddedToken, Model, Result, Token, TokenizerError, Trainer, TrainerArtifact, TrainerParams, Vocabulary,
-    layer,
+    layer, AddedToken, Model, Result, Token, TokenizerError, Trainer, TrainerArtifact,
+    TrainerParams, Vocabulary,
 };
 
 /// WordLevel 模型：不做子词切分，直接查表。
@@ -15,7 +15,11 @@ pub struct WordLevelModel {
 
 impl WordLevelModel {
     pub fn new(vocab: Vocabulary, unk_token: impl Into<String>) -> Self {
-        Self { vocab, unk_token: unk_token.into(), max_input_chars_per_word: 100 }
+        Self {
+            vocab,
+            unk_token: unk_token.into(),
+            max_input_chars_per_word: 100,
+        }
     }
 
     pub fn to_config_json(&self) -> serde_json::Value {
@@ -33,11 +37,19 @@ impl Model for WordLevelModel {
             return Ok(Vec::new());
         }
         if let Some(id) = self.vocab.token_to_id(sequence) {
-            return Ok(vec![Token { id, value: sequence.to_string(), offsets: (0, sequence.len()) }]);
+            return Ok(vec![Token {
+                id,
+                value: sequence.to_string(),
+                offsets: (0, sequence.len()),
+            }]);
         }
         match self.vocab.token_to_id(&self.unk_token) {
             // HF 语义：未登录词的 token 文本即 unk_token 本身（offsets 仍覆盖原片段）
-            Some(id) => Ok(vec![Token { id, value: self.unk_token.clone(), offsets: (0, sequence.len()) }]),
+            Some(id) => Ok(vec![Token {
+                id,
+                value: self.unk_token.clone(),
+                offsets: (0, sequence.len()),
+            }]),
             None => Err(TokenizerError::layer(
                 layer::MODEL,
                 format!("WordLevel：'{}' 未登录且缺少 unk_token", sequence),
@@ -61,13 +73,19 @@ impl Model for WordLevelModel {
         std::fs::create_dir_all(dir)?;
         let mut entries = self.vocab.sorted_entries();
         entries.sort_by_key(|(_, id)| *id);
-        let txt: String = entries.into_iter().map(|(t, _)| format!("{}\n", t)).collect();
+        let txt: String = entries
+            .into_iter()
+            .map(|(t, _)| format!("{}\n", t))
+            .collect();
         std::fs::write(dir.join("vocab.txt"), txt)?;
         Ok(vec!["vocab.txt".to_string()])
     }
 
     fn get_trainer(&self, params: &TrainerParams) -> Option<Box<dyn Trainer>> {
-        Some(Box::new(WordLevelTrainer::new(params.clone(), self.unk_token.clone())))
+        Some(Box::new(WordLevelTrainer::new(
+            params.clone(),
+            self.unk_token.clone(),
+        )))
     }
 
     fn apply_artifact(&mut self, artifact: &TrainerArtifact) -> Result<()> {
@@ -80,7 +98,10 @@ impl Model for WordLevelModel {
                 self.vocab = v;
                 Ok(())
             }
-            _ => Err(TokenizerError::layer(layer::MODEL, "artifact 不是 WordLevel 类型")),
+            _ => Err(TokenizerError::layer(
+                layer::MODEL,
+                "artifact 不是 WordLevel 类型",
+            )),
         }
     }
 }
@@ -130,7 +151,10 @@ impl Trainer for WordLevelTrainer {
 
     fn finish(&mut self) -> Result<TrainerArtifact> {
         if self.fed == 0 {
-            return Err(TokenizerError::layer(layer::MODEL, "WordLevel 训练：语料为空"));
+            return Err(TokenizerError::layer(
+                layer::MODEL,
+                "WordLevel 训练：语料为空",
+            ));
         }
         let reserved = self.special_tokens.len();
         let budget = self.vocab_size.saturating_sub(reserved);
@@ -149,7 +173,11 @@ impl Trainer for WordLevelTrainer {
             if vocab.len() >= budget {
                 break;
             }
-            if self.max_token_length.map(|m| w.chars().count() > m).unwrap_or(false) {
+            if self
+                .max_token_length
+                .map(|m| w.chars().count() > m)
+                .unwrap_or(false)
+            {
                 continue;
             }
             if seen.insert(w.clone()) {
@@ -193,10 +221,17 @@ mod tests {
 
     #[test]
     fn trainer_is_frequency_ordered() {
-        let params = TrainerParams { vocab_size: 8, min_frequency: 1, ..Default::default() };
+        let params = TrainerParams {
+            vocab_size: 8,
+            min_frequency: 1,
+            ..Default::default()
+        };
         let mut t = WordLevelTrainer::new(params, "[UNK]");
-        t.feed_groups(&[vec!["b".into(), "b".into(), "a".into()]]).unwrap();
-        let TrainerArtifact::WordLevel { vocab } = t.finish().unwrap() else { panic!() };
+        t.feed_groups(&[vec!["b".into(), "b".into(), "a".into()]])
+            .unwrap();
+        let TrainerArtifact::WordLevel { vocab } = t.finish().unwrap() else {
+            panic!()
+        };
         assert_eq!(vocab[0].0, "b");
         assert_eq!(vocab[1].0, "a");
     }

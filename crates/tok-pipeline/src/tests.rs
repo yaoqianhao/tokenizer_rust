@@ -9,7 +9,9 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use tok_core::{AddedToken, Model, PaddingParams, TrainerParams, TruncationParams, byte_level::byte_alphabet};
+use tok_core::{
+    byte_level::byte_alphabet, AddedToken, Model, PaddingParams, TrainerParams, TruncationParams,
+};
 use tok_decoders::DecoderConfig;
 use tok_models::ModelConfig;
 use tok_post::{PostProcessorConfig, SpecialTokenEntry, TemplatePiece};
@@ -17,10 +19,13 @@ use tok_pretok::{BehaviorSpec, PreTokenizerConfig, SplitDelimiterBehavior};
 use tok_trainers::CorpusReader;
 
 use crate::hf::{self, TokenRoles};
-use crate::tokenizer::{PipelineConfig, Tokenizer, bert_like, load_tokenizer_json};
+use crate::tokenizer::{bert_like, load_tokenizer_json, PipelineConfig, Tokenizer};
 
 fn temp_dir(tag: &str) -> PathBuf {
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
     let dir = std::env::temp_dir().join(format!("tok_pipeline_{}_{}", tag, nanos));
     std::fs::create_dir_all(&dir).unwrap();
     dir
@@ -83,7 +88,11 @@ fn byte_level_bpe_train_export_and_reload() {
 
     let reader = CorpusReader::new(vec![corpus.clone()]).extensions(vec!["txt".to_string()]);
     let report = tk.train(&reader, params).expect("训练失败");
-    assert!(report.vocab_size > 256, "字节级 BPE 词表应含 256 字节 + 合并产物，实际 {}", report.vocab_size);
+    assert!(
+        report.vocab_size > 256,
+        "字节级 BPE 词表应含 256 字节 + 合并产物，实际 {}",
+        report.vocab_size
+    );
     assert!(report.merges > 0, "应有合并规则产生");
 
     // 特殊 token 角色可由 added_tokens 推断
@@ -114,7 +123,10 @@ fn byte_level_bpe_train_export_and_reload() {
     hf::validate_tokenizer_json(&value).expect("tokenizer.json 结构不合法");
     assert_eq!(value["model"]["type"], "BPE");
     assert!(value["model"]["vocab"].as_object().unwrap().len() > 256);
-    assert_eq!(value["model"]["merges"].as_array().unwrap().len(), report.merges);
+    assert_eq!(
+        value["model"]["merges"].as_array().unwrap().len(),
+        report.merges
+    );
     // merges 采用 HF 0.20+ 的 [["a","b"], ...] 形状
     let first_merge = &value["model"]["merges"][0];
     assert!(first_merge.is_array(), "merges 每项应为二元数组");
@@ -146,7 +158,11 @@ fn byte_level_bpe_train_export_and_reload() {
     for text in ["hello world", "lowest newer", "world peace"] {
         let a = tk.encode(text, true).unwrap();
         let b = tk2.encode(text, true).unwrap();
-        assert_eq!(a.ids, b.ids, "文本 {:?} 编码不一致: {:?} vs {:?}", text, a.ids, b.ids);
+        assert_eq!(
+            a.ids, b.ids,
+            "文本 {:?} 编码不一致: {:?} vs {:?}",
+            text, a.ids, b.ids
+        );
         assert_eq!(a.tokens, b.tokens);
     }
 
@@ -162,12 +178,19 @@ fn byte_level_bpe_train_export_and_reload() {
 fn byte_level_bpe_shares_vocab_with_added_specials() {
     // 空词表 + 预先声明的 added token：训练后 added token 仍须可查 id 且不在 base 区
     let mut cfg = byte_level_config();
-    cfg.added_tokens = vec![AddedToken::new("<pad>", true), AddedToken::new("<mask>", true)];
+    cfg.added_tokens = vec![
+        AddedToken::new("<pad>", true),
+        AddedToken::new("<mask>", true),
+    ];
     cfg.roles.pad_token = Some("<pad>".to_string());
     cfg.roles.mask_token = Some("<mask>".to_string());
 
     let mut tk = Tokenizer::from_config(&cfg).unwrap();
-    let pad_id = tk.model().get_vocab().token_to_id("<pad>").expect("added token 应可查 id");
+    let pad_id = tk
+        .model()
+        .get_vocab()
+        .token_to_id("<pad>")
+        .expect("added token 应可查 id");
     let mask_id = tk.model().get_vocab().token_to_id("<mask>").unwrap();
     assert_ne!(pad_id, mask_id);
 
@@ -184,20 +207,41 @@ fn byte_level_bpe_shares_vocab_with_added_specials() {
     // 注意：训练会以 trainer 产物重建 base 词表（256 字节 + 合并产物占据 0..N），
     // added token 的 id 必然被重新分配到 base 之后（与 HF 语义一致：added 恒在 base 区之外），
     // 原 id 不可保留；因此验收点改为「仍可查、落在 base 之外、编号不冲突、回读稳定」。
-    let pad_after = tk.model().get_vocab().token_to_id("<pad>").expect("<pad> 训练后应仍可查 id");
-    let mask_after = tk.model().get_vocab().token_to_id("<mask>").expect("<mask> 训练后应仍可查 id");
+    let pad_after = tk
+        .model()
+        .get_vocab()
+        .token_to_id("<pad>")
+        .expect("<pad> 训练后应仍可查 id");
+    let mask_after = tk
+        .model()
+        .get_vocab()
+        .token_to_id("<mask>")
+        .expect("<mask> 训练后应仍可查 id");
     assert_ne!(pad_after, mask_after, "added token 编号不得冲突");
-    assert!(pad_after >= 256, "added token 应落在 256 字节 base 区之外，实际 {}", pad_after);
-    assert!(tk.special_ids().contains(&pad_after), "<pad> 应仍被登记为特殊 token");
-    assert_ne!(pad_after, pad_id, "base 词表重建后 added token 应获得 base 之外的新 id");
+    assert!(
+        pad_after >= 256,
+        "added token 应落在 256 字节 base 区之外，实际 {}",
+        pad_after
+    );
+    assert!(
+        tk.special_ids().contains(&pad_after),
+        "<pad> 应仍被登记为特殊 token"
+    );
+    assert_ne!(
+        pad_after, pad_id,
+        "base 词表重建后 added token 应获得 base 之外的新 id"
+    );
 
     let out = dir.join("hf");
     tk.save_pretrained(&out).unwrap();
     let value: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(out.join(hf::TOKENIZER_JSON)).unwrap()).unwrap();
+        serde_json::from_str(&std::fs::read_to_string(out.join(hf::TOKENIZER_JSON)).unwrap())
+            .unwrap();
     let added = value["added_tokens"].as_array().unwrap();
     assert!(added.iter().any(|t| t["content"] == "<pad>"));
-    assert!(added.iter().all(|t| t["special"].as_bool().unwrap_or(false)));
+    assert!(added
+        .iter()
+        .all(|t| t["special"].as_bool().unwrap_or(false)));
 
     // 回读后 added token 的 id 必须稳定（导出/回读不重编号）
     let reloaded = load_tokenizer_json(&out.join(hf::TOKENIZER_JSON)).expect("回读失败");
@@ -214,7 +258,10 @@ fn byte_level_bpe_shares_vocab_with_added_specials() {
 
 fn wordpiece_vocab() -> BTreeMap<String, u32> {
     let mut v = BTreeMap::new();
-    for (i, t) in ["[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]"].iter().enumerate() {
+    for (i, t) in ["[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]"]
+        .iter()
+        .enumerate()
+    {
         v.insert(t.to_string(), i as u32);
     }
     v.insert("hello".to_string(), 5);
@@ -249,10 +296,18 @@ fn wordpiece_pair_template_and_special_mask() {
     let tk = Tokenizer::from_config(&bert_config(true)).unwrap();
 
     let enc = tk.encode_pair("hello world", "tokenizer!", true).unwrap();
-    assert_eq!(enc.ids.first().copied(), Some(2), "pair 编码应以 [CLS]=2 开头");
+    assert_eq!(
+        enc.ids.first().copied(),
+        Some(2),
+        "pair 编码应以 [CLS]=2 开头"
+    );
     assert_eq!(enc.type_ids.first().copied(), Some(0));
     assert_eq!(enc.type_ids.last().copied(), Some(1));
-    assert_eq!(enc.ids.iter().filter(|i| **i == 3).count(), 2, "pair 应含两个 [SEP]");
+    assert_eq!(
+        enc.ids.iter().filter(|i| **i == 3).count(),
+        2,
+        "pair 应含两个 [SEP]"
+    );
     let mask_sum: u32 = enc.special_tokens_mask.iter().map(|m| *m as u32).sum();
     assert_eq!(mask_sum, 3, "[CLS] + 2×[SEP] 应为 3 个特殊位");
     assert_eq!(enc.len(), enc.ids.len());
@@ -267,7 +322,13 @@ fn wordpiece_pair_template_and_special_mask() {
     let raw = tk.encode_pair("hello world", "tokenizer!", false).unwrap();
     assert!(!raw.ids.contains(&2));
     assert!(!raw.ids.contains(&3));
-    assert_eq!(raw.special_tokens_mask.iter().map(|m| *m as u32).sum::<u32>(), 0);
+    assert_eq!(
+        raw.special_tokens_mask
+            .iter()
+            .map(|m| *m as u32)
+            .sum::<u32>(),
+        0
+    );
 
     // 未登录词 → [UNK]
     let unknown = tk.encode("zzz", false).unwrap();
@@ -285,7 +346,12 @@ fn wordpiece_wordpiece_output_shape() {
     let mut last_end = 0usize;
     for (s, e) in &enc.offsets {
         assert!(*e >= *s, "offset 倒挂 {:?}；全部 {:?}", (s, e), enc.offsets);
-        assert!(*s >= last_end, "offset 非单调 {:?}；全部 {:?}", (s, e), enc.offsets);
+        assert!(
+            *s >= last_end,
+            "offset 非单调 {:?}；全部 {:?}",
+            (s, e),
+            enc.offsets
+        );
         last_end = *e;
     }
 }
@@ -298,7 +364,11 @@ fn truncation_and_padding_follow_hf_semantics() {
         ..Default::default()
     }));
     let enc = tk.encode("hello world hello world hello", true).unwrap();
-    assert!(enc.ids.len() <= 4, "截断后长度应 ≤ 4，实际 {}", enc.ids.len());
+    assert!(
+        enc.ids.len() <= 4,
+        "截断后长度应 ≤ 4，实际 {}",
+        enc.ids.len()
+    );
     assert!(enc.overflowing.len() >= 1, "长序列应产生溢出片段");
     assert_eq!(enc.ids.first().copied(), Some(2), "截断须保留 [CLS]");
     assert_eq!(enc.ids.last().copied(), Some(3), "截断须保留 [SEP]");
@@ -327,7 +397,10 @@ fn template_processing_round_trips_through_json() {
     let text = serde_json::to_string(&value).unwrap();
     let back: serde_json::Value = serde_json::from_str(&text).unwrap();
     let tk2 = Tokenizer::from_tokenizer_json(&back).unwrap();
-    assert_eq!(tk.encode("hello world", true).unwrap().ids, tk2.encode("hello world", true).unwrap().ids);
+    assert_eq!(
+        tk.encode("hello world", true).unwrap().ids,
+        tk2.encode("hello world", true).unwrap().ids
+    );
 
     // 模板节形状
     let pp = &value["post_processor"];
@@ -356,15 +429,66 @@ fn validate_rejects_broken_tokenizer_json() {
 }
 
 #[test]
+fn special_tokens_already_in_vocab_are_tracked() {
+    // 训练器会把 special token 直接写进 base 词表（`[UNK]` 等），这类 token 仍需同时
+    // 出现在后加视图中：HF 的 `special_ids` / `skip_special_tokens` / `special_tokens_mask`
+    // 都读后加视图，漏登记会让 decode(ids, skip_special=true) 输出 "<unk>" 字面。
+    let tk = Tokenizer::from_config(&bert_config(false)).unwrap();
+    let unk = 1u32; // [UNK]
+    let hello = 5u32;
+    assert!(
+        tk.special_ids().contains(&unk),
+        "[UNK] 已在 base 词表，也必须出现在 special_ids 中"
+    );
+    assert_eq!(tk.decode(&[unk], true).unwrap(), "");
+    assert_eq!(tk.decode(&[unk, hello], true).unwrap(), "hello");
+    // skip_special_tokens=false 时保留字面（与 HF 一致）
+    assert_eq!(tk.decode(&[unk, hello], false).unwrap(), "[UNK] hello");
+}
+
+#[test]
+fn unk_and_cjk_tokens_keep_real_offsets() {
+    // HF 语义：`offsets` 永远指向原文真实区间，特殊/未登录 token 也不例外
+    //（只有 special_tokens_mask 标 1）。曾经的实现把 is_special 的 offset 置 (0,0)，
+    // 导致 [UNK] 与中文词元的 offsets 全为 0，与 HF 不一致。
+    let tk = Tokenizer::from_config(&bert_config(false)).unwrap();
+
+    let enc = tk.encode("hello   world again", true).unwrap();
+    let world = enc
+        .tokens
+        .iter()
+        .position(|t| t == "world")
+        .expect("缺 world");
+    assert_eq!(enc.offsets[world], (8, 13));
+    let last = enc.tokens.len() - 1;
+    assert_eq!(enc.tokens[last], "[UNK]");
+    assert_eq!(enc.offsets[last], (14, 19), "[UNK] 的 offset 应为真实区间");
+    assert_eq!(enc.special_tokens_mask[last], 1, "[UNK] 仍须标记为 special");
+
+    let enc = tk.encode("苹果 香蕉", true).unwrap();
+    assert!(enc.tokens.iter().all(|t| t == "[UNK]"));
+    assert_eq!(enc.offsets[0], (0, 2));
+    assert_eq!(enc.offsets[1], (3, 5));
+}
+
+#[test]
 fn manual_template_processing_builds_pair_section() {
     let mut specials = BTreeMap::new();
     specials.insert(
         "[CLS]".to_string(),
-        SpecialTokenEntry { id: "[CLS]".to_string(), ids: vec![2], tokens: vec!["[CLS]".to_string()] },
+        SpecialTokenEntry {
+            id: "[CLS]".to_string(),
+            ids: vec![2],
+            tokens: vec!["[CLS]".to_string()],
+        },
     );
     specials.insert(
         "[SEP]".to_string(),
-        SpecialTokenEntry { id: "[SEP]".to_string(), ids: vec![3], tokens: vec!["[SEP]".to_string()] },
+        SpecialTokenEntry {
+            id: "[SEP]".to_string(),
+            ids: vec![3],
+            tokens: vec!["[SEP]".to_string()],
+        },
     );
     let single = vec![
         TemplatePiece::special("[CLS]", 0),
@@ -379,7 +503,11 @@ fn manual_template_processing_builds_pair_section() {
         TemplatePiece::special("[SEP]", 1),
     ];
     let mut cfg = bert_config(false);
-    cfg.post_processor = Some(PostProcessorConfig::TemplateProcessing { single, pair, special_tokens: specials });
+    cfg.post_processor = Some(PostProcessorConfig::TemplateProcessing {
+        single,
+        pair,
+        special_tokens: specials,
+    });
 
     let tk = Tokenizer::from_config(&cfg).unwrap();
     let enc = tk.encode_pair("hello", "world", true).unwrap();
@@ -399,9 +527,13 @@ fn byte_level_split_delimiter_behaviour_is_configurable() {
     });
     cfg.decoder = None;
     cfg.model = tok_models::byte_level_bpe_config(
-        [("a".to_string(), 0u32), ("b".to_string(), 1u32), ("|".to_string(), 2u32)]
-            .into_iter()
-            .collect(),
+        [
+            ("a".to_string(), 0u32),
+            ("b".to_string(), 1u32),
+            ("|".to_string(), 2u32),
+        ]
+        .into_iter()
+        .collect(),
         Vec::new(),
     );
 
@@ -411,6 +543,9 @@ fn byte_level_split_delimiter_behaviour_is_configurable() {
     assert_eq!(enc.offsets, vec![(0, 1), (1, 2), (2, 3)]);
 
     // 明确解析行为枚举，避免“配置静默失效”
-    assert_eq!(BehaviorSpec::named("isolated").parse().unwrap(), SplitDelimiterBehavior::Isolated);
+    assert_eq!(
+        BehaviorSpec::named("isolated").parse().unwrap(),
+        SplitDelimiterBehavior::Isolated
+    );
     assert!(BehaviorSpec::named("nonsense").parse().is_err());
 }
