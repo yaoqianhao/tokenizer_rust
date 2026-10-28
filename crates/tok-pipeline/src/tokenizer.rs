@@ -410,6 +410,8 @@ impl Tokenizer {
     ) -> Result<Vec<Encoding>> {
         // 每条文本的编码相互独立、且 `encode` 只读 `&self`，可直接并行。
         // 顺序由 rayon 的 indexed collect 保证，与串行结果逐条对应。
+        // 不做显式分块：任务粒度由 rayon 的工作窃取自行切分，每条文本的中间缓冲
+        // 随元素生命周期结束即释放，内存峰值由**单条最长文本**决定，与批量大小无关。
         texts
             .par_iter()
             .map(|t| self.encode(t, add_special_tokens))

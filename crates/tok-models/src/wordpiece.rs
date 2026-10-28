@@ -367,6 +367,17 @@ mod tests {
     }
 
     #[test]
+    fn partial_match_then_failure_discards_pieces() {
+        // HF 语义：贪心过程中一旦有字符无法匹配，已产出的片段全部丢弃，
+        // 整词退化为**单个** UNK（不是"前缀片段 + UNK"），偏移覆盖整词。
+        let m = model();
+        let toks = m.tokenize("unwantly").unwrap();
+        assert_eq!(toks.len(), 1, "不应残留 un / ##want 的部分匹配结果");
+        assert_eq!(toks[0].value, "[UNK]");
+        assert_eq!(toks[0].offsets, (0, "unwantly".len()));
+    }
+
+    #[test]
     fn trainer_keeps_unk_in_vocab() {
         let params = TrainerParams {
             vocab_size: 30,
